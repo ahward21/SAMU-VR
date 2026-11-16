@@ -99,7 +99,7 @@ add_executable(samu_vr_launcher WIN32
 set_target_properties(samu_vr_launcher PROPERTIES OUTPUT_NAME "SAMU-VR-Launcher")
 target_compile_definitions(samu_vr_launcher PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE _CRT_SECURE_NO_WARNINGS)
 target_compile_options(samu_vr_launcher PRIVATE /W4 /permissive- /utf-8)
-target_link_libraries(samu_vr_launcher PRIVATE user32 gdi32 shell32 ole32 uuid comctl32 advapi32)
+target_link_libraries(samu_vr_launcher PRIVATE user32 gdi32 shell32 ole32 uuid comctl32 advapi32 winhttp bcrypt)
 add_dependencies(samu_vr_launcher d3d9_proxy)
 add_custom_command(TARGET samu_vr_launcher POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_SOURCE_DIR}/dist"

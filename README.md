@@ -26,6 +26,7 @@ An open-source, free **OpenXR 6DOF VR mod** for ***A Story About My Uncle*** (PC
 5. **Click `Install & Launch VR`** (or click **Install** first, then **Launch in VR**):
    - If the game is installed under `C:\Program Files (x86)\Steam\...`, Windows may prompt for Administrator (UAC) approval so the launcher can write into that folder.
    - Installing places `d3d9.dll`, `samu_vr.ini` (only created if missing, so your saved settings are kept on updates), and `steam_appid.txt` (`278360`) into `Binaries\Win32\`.
+   - **Automatic updates:** On launch, `SAMU-VR-Launcher.exe` checks GitHub Releases for newer `d3d9.dll` builds (verified via SHA-256). When an update is released, just click **Update** inside the launcher — no need to re-download the launcher manually.
 6. **To uninstall / return to vanilla flat-screen:** Open `SAMU-VR-Launcher.exe` and click **Uninstall** (removes `d3d9.dll`).
 
 ---

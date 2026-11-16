@@ -4,11 +4,14 @@
 #include "resource.h"
 
 #include <windows.h>
+#include <bcrypt.h>
 #include <commctrl.h>
 #include <shellapi.h>
 #include <shobjidl.h>
+#include <winhttp.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -20,12 +23,16 @@
 
 namespace {
 
-constexpr wchar_t kAppTitle[]      = L"SAMU-VR";
-constexpr wchar_t kWindowClass[]   = L"SamuVrLauncherWnd";
-constexpr wchar_t kGameExeName[]   = L"ASAMU-Win32-Shipping.exe";
-constexpr wchar_t kProxyDllName[]  = L"d3d9.dll";
-constexpr wchar_t kConfigIniName[] = L"samu_vr.ini";
-constexpr wchar_t kSteamAppId[]    = L"278360";
+constexpr wchar_t kAppTitle[]         = L"SAMU-VR";
+constexpr wchar_t kLauncherVersion[]  = L"1.0.1";
+constexpr wchar_t kWindowClass[]      = L"SamuVrLauncherWnd";
+constexpr wchar_t kGameExeName[]      = L"ASAMU-Win32-Shipping.exe";
+constexpr wchar_t kProxyDllName[]     = L"d3d9.dll";
+constexpr wchar_t kConfigIniName[]    = L"samu_vr.ini";
+constexpr wchar_t kSteamAppId[]       = L"278360";
+constexpr wchar_t kGithubApiHost[]    = L"api.github.com";
+constexpr wchar_t kGithubLatestPath[] = L"/repos/ahward21/SAMU-VR/releases/latest";
+constexpr UINT    WM_APP_REMOTE_CHECK = WM_APP + 1;
 
 // Minimal matte dark palette (single calm monochrome hierarchy)
 constexpr COLORREF kColBg         = RGB(20, 21, 25);
@@ -49,6 +56,13 @@ enum ControlId : int {
     IDC_LBL_FEEDBACK,
 };
 
+struct RemoteReleaseInfo {
+    bool         valid = false;
+    std::wstring tag;
+    std::wstring dllUrl;
+    std::wstring sha256;
+};
+
 struct AppState {
     HINSTANCE hInst = nullptr;
     HWND      hwnd  = nullptr;
@@ -65,6 +79,9 @@ struct AppState {
     std::wstring win32Dir;
     std::wstring openXrText;
     bool         openXrReady = false;
+
+    RemoteReleaseInfo remote;
+    bool              remoteUpdateAvailable = false;
 
     enum class ModStatus { NoGameFound, NotInstalled, UpdateAvailable, UpToDate };
     ModStatus modStatus = ModStatus::NoGameFound;
@@ -277,11 +294,242 @@ void DetectOpenXrRuntime() {
     g_app.openXrText = name + (g_app.openXrReady ? L" ready" : L" (runtime file missing)");
 }
 
-bool PerformInstallCore(const std::wstring& win32Dir, bool overwriteIni, DWORD& outErr) {
+std::wstring Utf8ToWide(const std::string& s) {
+    if (s.empty()) return {};
+    int need = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), static_cast<int>(s.size()), nullptr, 0);
+    if (need <= 0) return {};
+    std::wstring out(static_cast<size_t>(need), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, s.c_str(), static_cast<int>(s.size()), out.data(), need);
+    return out;
+}
+
+std::wstring ComputeSha256Hex(const void* data, size_t size) {
+    if (!data || size == 0) return {};
+    BCRYPT_ALG_HANDLE hAlg = nullptr;
+    if (!BCRYPT_SUCCESS(BCryptOpenAlgorithmProvider(&hAlg, BCRYPT_SHA256_ALGORITHM, nullptr, 0))) return {};
+
+    DWORD hashLen = 0, cbData = 0;
+    if (!BCRYPT_SUCCESS(BCryptGetProperty(hAlg, BCRYPT_HASH_LENGTH, reinterpret_cast<PUCHAR>(&hashLen),
+                                          sizeof(hashLen), &cbData, 0)) ||
+        hashLen != 32) {
+        BCryptCloseAlgorithmProvider(hAlg, 0);
+        return {};
+    }
+
+    BCRYPT_HASH_HANDLE hHash = nullptr;
+    std::wstring hex;
+    if (BCRYPT_SUCCESS(BCryptCreateHash(hAlg, &hHash, nullptr, 0, nullptr, 0, 0))) {
+        uint8_t digest[32]{};
+        if (BCRYPT_SUCCESS(BCryptHashData(hHash, static_cast<PUCHAR>(const_cast<void*>(data)),
+                                          static_cast<ULONG>(size), 0)) &&
+            BCRYPT_SUCCESS(BCryptFinishHash(hHash, digest, sizeof(digest), 0))) {
+            static constexpr wchar_t kHex[] = L"0123456789abcdef";
+            hex.reserve(64);
+            for (uint8_t b : digest) {
+                hex.push_back(kHex[(b >> 4) & 0xF]);
+                hex.push_back(kHex[b & 0xF]);
+            }
+        }
+        BCryptDestroyHash(hHash);
+    }
+    BCryptCloseAlgorithmProvider(hAlg, 0);
+    return hex;
+}
+
+bool ParseSemVer(const std::wstring& tag, int& maj, int& min, int& pat) {
+    maj = min = pat = 0;
+    size_t i = 0;
+    if (i < tag.size() && (tag[i] == L'v' || tag[i] == L'V')) ++i;
+    auto readNum = [&](int& out) -> bool {
+        if (i >= tag.size() || tag[i] < L'0' || tag[i] > L'9') return false;
+        int v = 0;
+        while (i < tag.size() && tag[i] >= L'0' && tag[i] <= L'9') {
+            v = v * 10 + (tag[i] - L'0');
+            ++i;
+        }
+        out = v;
+        return true;
+    };
+    if (!readNum(maj)) return false;
+    if (i < tag.size() && tag[i] == L'.') { ++i; if (!readNum(min)) return false; }
+    if (i < tag.size() && tag[i] == L'.') { ++i; if (!readNum(pat)) return false; }
+    return true;
+}
+
+int CompareSemVer(const std::wstring& a, const std::wstring& b) {
+    int amaj = 0, amin = 0, apat = 0;
+    int bmaj = 0, bmin = 0, bpat = 0;
+    if (!ParseSemVer(a, amaj, amin, apat) || !ParseSemVer(b, bmaj, bmin, bpat)) return 0;
+    if (amaj != bmaj) return (amaj > bmaj) ? 1 : -1;
+    if (amin != bmin) return (amin > bmin) ? 1 : -1;
+    if (apat != bpat) return (apat > bpat) ? 1 : -1;
+    return 0;
+}
+
+bool HttpGetBytes(const std::wstring& url, std::vector<uint8_t>& out, bool isApi) {
+    out.clear();
+    URL_COMPONENTSW uc{sizeof(uc)};
+    wchar_t host[256]{};
+    wchar_t path[2048]{};
+    uc.lpszHostName      = host;
+    uc.dwHostNameLength  = 256;
+    uc.lpszUrlPath       = path;
+    uc.dwUrlPathLength   = 2048;
+    if (!WinHttpCrackUrl(url.c_str(), static_cast<DWORD>(url.size()), 0, &uc)) return false;
+
+    HINTERNET hSession = WinHttpOpen(L"SAMU-VR-Launcher/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+                                     WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!hSession) return false;
+    WinHttpSetTimeouts(hSession, 3500, 3500, 4000, isApi ? 5000 : 25000);
+
+    HINTERNET hConnect = WinHttpConnect(hSession, host, uc.nPort, 0);
+    if (!hConnect) { WinHttpCloseHandle(hSession); return false; }
+
+    const DWORD flags = (uc.nScheme == INTERNET_SCHEME_HTTPS) ? WINHTTP_FLAG_SECURE : 0;
+    HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"GET", path, nullptr, WINHTTP_NO_REFERER,
+                                            WINHTTP_DEFAULT_ACCEPT_TYPES, flags);
+    if (!hRequest) {
+        WinHttpCloseHandle(hConnect);
+        WinHttpCloseHandle(hSession);
+        return false;
+    }
+
+    DWORD redir = WINHTTP_OPTION_REDIRECT_POLICY_DISALLOW_HTTPS_TO_HTTP;
+    WinHttpSetOption(hRequest, WINHTTP_OPTION_REDIRECT_POLICY, &redir, sizeof(redir));
+
+    const wchar_t* hdrs = isApi ? L"Accept: application/vnd.github+json\r\n" : WINHTTP_NO_ADDITIONAL_HEADERS;
+    bool ok = WinHttpSendRequest(hRequest, hdrs, hdrs ? static_cast<DWORD>(-1) : 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0) &&
+              WinHttpReceiveResponse(hRequest, nullptr);
+    if (ok) {
+        DWORD status = 0, cbStatus = sizeof(status);
+        if (!WinHttpQueryHeaders(hRequest, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                                 nullptr, &status, &cbStatus, nullptr) ||
+            status != 200) {
+            ok = false;
+        }
+    }
+
+    if (ok) {
+        constexpr size_t kMaxBytes = 16 * 1024 * 1024;
+        for (;;) {
+            DWORD avail = 0;
+            if (!WinHttpQueryDataAvailable(hRequest, &avail)) { ok = false; break; }
+            if (avail == 0) break;
+            if (out.size() + avail > kMaxBytes) { ok = false; break; }
+            const size_t oldSz = out.size();
+            out.resize(oldSz + avail);
+            DWORD read = 0;
+            if (!WinHttpReadData(hRequest, out.data() + oldSz, avail, &read)) { ok = false; break; }
+            out.resize(oldSz + read);
+        }
+    }
+
+    WinHttpCloseHandle(hRequest);
+    WinHttpCloseHandle(hConnect);
+    WinHttpCloseHandle(hSession);
+    return ok && !out.empty();
+}
+
+bool ExtractJsonStringField(const std::string& jsonSlice, const char* fieldName, std::string& outVal) {
+    std::string needle = std::string("\"") + fieldName + "\"";
+    size_t pos = jsonSlice.find(needle);
+    while (pos != std::string::npos) {
+        size_t p = pos + needle.size();
+        while (p < jsonSlice.size() && (jsonSlice[p] == ' ' || jsonSlice[p] == '\t' || jsonSlice[p] == '\r' || jsonSlice[p] == '\n')) ++p;
+        if (p < jsonSlice.size() && jsonSlice[p] == ':') {
+            ++p;
+            while (p < jsonSlice.size() && (jsonSlice[p] == ' ' || jsonSlice[p] == '\t' || jsonSlice[p] == '\r' || jsonSlice[p] == '\n')) ++p;
+            if (p < jsonSlice.size() && jsonSlice[p] == '"') {
+                ++p;
+                outVal.clear();
+                while (p < jsonSlice.size()) {
+                    char c = jsonSlice[p++];
+                    if (c == '"') return true;
+                    if (c == '\\' && p < jsonSlice.size()) {
+                        char esc = jsonSlice[p++];
+                        if (esc == '"' || esc == '\\' || esc == '/') outVal.push_back(esc);
+                    } else {
+                        outVal.push_back(c);
+                    }
+                }
+                return false;
+            }
+        }
+        pos = jsonSlice.find(needle, pos + needle.size());
+    }
+    return false;
+}
+
+RemoteReleaseInfo ParseLatestReleaseJson(const std::string& json) {
+    RemoteReleaseInfo info;
+    std::string tag;
+    if (!ExtractJsonStringField(json, "tag_name", tag) || tag.empty()) return info;
+    info.tag = Utf8ToWide(tag);
+
+    size_t assetsPos = json.find("\"assets\"");
+    if (assetsPos == std::string::npos) return info;
+    size_t arrStart = json.find('[', assetsPos);
+    if (arrStart == std::string::npos) return info;
+
+    size_t p = arrStart + 1;
+    bool inStr = false;
+    int  depth = 0;
+    size_t objStart = std::string::npos;
+    for (; p < json.size(); ++p) {
+        char c = json[p];
+        if (inStr) {
+            if (c == '\\' && p + 1 < json.size()) { ++p; continue; }
+            if (c == '"') inStr = false;
+            continue;
+        }
+        if (c == '"') { inStr = true; continue; }
+        if (c == ']' && depth == 0) break;
+        if (c == '{') {
+            if (depth == 0) objStart = p;
+            ++depth;
+        } else if (c == '}') {
+            if (depth > 0) --depth;
+            if (depth == 0 && objStart != std::string::npos) {
+                std::string obj = json.substr(objStart, p - objStart + 1);
+                std::string name, url, digest;
+                if (ExtractJsonStringField(obj, "name", name) && name == "d3d9.dll" &&
+                    ExtractJsonStringField(obj, "browser_download_url", url) &&
+                    url.rfind("https://", 0) == 0) {
+                    info.dllUrl = Utf8ToWide(url);
+                    if (ExtractJsonStringField(obj, "digest", digest) && digest.rfind("sha256:", 0) == 0) {
+                        std::string hex = digest.substr(7);
+                        std::transform(hex.begin(), hex.end(), hex.begin(),
+                                       [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+                        info.sha256 = Utf8ToWide(hex);
+                    }
+                    info.valid = true;
+                    return info;
+                }
+                objStart = std::string::npos;
+            }
+        }
+    }
+    return info;
+}
+
+DWORD WINAPI RemoteCheckThread(LPVOID param) {
+    HWND hwnd = static_cast<HWND>(param);
+    std::wstring apiUrl = std::wstring(L"https://") + kGithubApiHost + kGithubLatestPath;
+    std::vector<uint8_t> body;
+    auto* info = new RemoteReleaseInfo();
+    if (HttpGetBytes(apiUrl, body, true)) {
+        std::string json(reinterpret_cast<const char*>(body.data()), body.size());
+        *info = ParseLatestReleaseJson(json);
+    }
+    if (!hwnd || !PostMessageW(hwnd, WM_APP_REMOTE_CHECK, 0, reinterpret_cast<LPARAM>(info))) {
+        delete info;
+    }
+    return 0;
+}
+
+bool PerformInstallFromBytes(const std::wstring& win32Dir, const void* dllBytes, DWORD dllSize, bool overwriteIni, DWORD& outErr) {
     outErr = 0;
-    const void* dllBytes = nullptr;
-    DWORD dllSize = 0;
-    if (!LoadResourceBytes(IDR_PROXY_DLL, dllBytes, dllSize)) {
+    if (!dllBytes || dllSize == 0) {
         outErr = ERROR_RESOURCE_DATA_NOT_FOUND;
         return false;
     }
@@ -300,6 +548,25 @@ bool PerformInstallCore(const std::wstring& win32Dir, bool overwriteIni, DWORD& 
     DWORD tmpErr = 0;
     WriteBytesAtomic(win32Dir + L"\\steam_appid.txt", appIdBytes, sizeof(appIdBytes) - 1, tmpErr);
     return true;
+}
+
+bool PerformInstallCore(const std::wstring& win32Dir, bool overwriteIni, DWORD& outErr) {
+    const void* dllBytes = nullptr;
+    DWORD dllSize = 0;
+    if (!LoadResourceBytes(IDR_PROXY_DLL, dllBytes, dllSize)) {
+        outErr = ERROR_RESOURCE_DATA_NOT_FOUND;
+        return false;
+    }
+    return PerformInstallFromBytes(win32Dir, dllBytes, dllSize, overwriteIni, outErr);
+}
+
+bool PerformInstallFromFile(const std::wstring& win32Dir, const std::wstring& srcDllPath, bool overwriteIni, DWORD& outErr) {
+    std::vector<uint8_t> bytes;
+    if (!ReadFileBytes(srcDllPath, bytes) || bytes.size() < 65536 || bytes[0] != 'M' || bytes[1] != 'Z') {
+        outErr = ERROR_INVALID_DATA;
+        return false;
+    }
+    return PerformInstallFromBytes(win32Dir, bytes.data(), static_cast<DWORD>(bytes.size()), overwriteIni, outErr);
 }
 
 bool PerformUninstallCore(const std::wstring& win32Dir, DWORD& outErr) {
@@ -346,6 +613,8 @@ void RefreshStatus() {
     const void* embPtr = nullptr;
     DWORD embSize = 0;
     const bool haveEmb = LoadResourceBytes(IDR_PROXY_DLL, embPtr, embSize);
+    const bool remoteNewer = g_app.remote.valid && (CompareSemVer(g_app.remote.tag, kLauncherVersion) > 0);
+    g_app.remoteUpdateAvailable = false;
 
     HWND hStatus    = GetDlgItem(g_app.hwnd, IDC_LBL_STATUS);
     HWND hLaunch    = GetDlgItem(g_app.hwnd, IDC_BTN_LAUNCH);
@@ -367,20 +636,38 @@ void RefreshStatus() {
         std::wstring dllPath = g_app.win32Dir + L"\\" + kProxyDllName;
         if (!FileExists(dllPath)) {
             g_app.modStatus = AppState::ModStatus::NotInstalled;
-            SetWindowTextW(hStatus, L"Ready to install");
+            g_app.remoteUpdateAvailable = remoteNewer;
+            std::wstring st = remoteNewer
+                ? (L"Ready to install (" + g_app.remote.tag + L" from GitHub)")
+                : L"Ready to install";
+            SetWindowTextW(hStatus, st.c_str());
             SetWindowTextW(hLaunch, L"Install && Launch VR");
             SetWindowTextW(hInstall, L"Install");
             EnableWindow(hUninstall, FALSE);
         } else {
             std::vector<uint8_t> cur;
-            bool match = haveEmb && ReadFileBytes(dllPath, cur) &&
-                         cur.size() == embSize && std::memcmp(cur.data(), embPtr, embSize) == 0;
+            const bool readOk = ReadFileBytes(dllPath, cur);
+            bool match = false;
+            if (remoteNewer) {
+                const std::wstring curSha = readOk ? ComputeSha256Hex(cur.data(), cur.size()) : std::wstring{};
+                match = !g_app.remote.sha256.empty() && curSha == g_app.remote.sha256;
+                g_app.remoteUpdateAvailable = !match;
+            } else {
+                match = haveEmb && readOk &&
+                        cur.size() == embSize && std::memcmp(cur.data(), embPtr, embSize) == 0;
+            }
             g_app.modStatus = match ? AppState::ModStatus::UpToDate : AppState::ModStatus::UpdateAvailable;
             if (match) {
-                SetWindowTextW(hStatus, L"VR Mod installed (up to date)");
+                std::wstring st = remoteNewer
+                    ? (L"VR Mod installed (" + g_app.remote.tag + L", up to date)")
+                    : L"VR Mod installed (up to date)";
+                SetWindowTextW(hStatus, st.c_str());
                 SetWindowTextW(hInstall, L"Reinstall");
             } else {
-                SetWindowTextW(hStatus, L"Update available");
+                std::wstring st = remoteNewer
+                    ? (L"Update available (" + g_app.remote.tag + L" on GitHub)")
+                    : L"Update available";
+                SetWindowTextW(hStatus, st.c_str());
                 SetWindowTextW(hInstall, L"Update");
             }
             SetWindowTextW(hLaunch, L"Launch in VR");
@@ -430,10 +717,52 @@ void BrowseForGameFolder() {
 
 bool DoInstall(bool quietSuccess = false) {
     if (g_app.win32Dir.empty()) return false;
+
+    std::vector<uint8_t> downloaded;
+    bool useRemote = false;
+    if (g_app.remoteUpdateAvailable && g_app.remote.valid) {
+        SetFeedback(L"Downloading " + g_app.remote.tag + L" from GitHub...");
+        UpdateWindow(g_app.hwnd);
+        if (HttpGetBytes(g_app.remote.dllUrl, downloaded, false) &&
+            downloaded.size() >= 65536 && downloaded[0] == 'M' && downloaded[1] == 'Z') {
+            if (g_app.remote.sha256.empty() ||
+                ComputeSha256Hex(downloaded.data(), downloaded.size()) == g_app.remote.sha256) {
+                useRemote = true;
+            }
+        }
+        if (!useRemote) {
+            int ans = MessageBoxW(
+                g_app.hwnd,
+                L"Could not download or verify the latest update from GitHub.\n\nInstall the bundled offline version instead?",
+                kAppTitle, MB_ICONWARNING | MB_YESNO);
+            if (ans != IDYES) {
+                SetFeedback(L"Update cancelled.");
+                return false;
+            }
+        }
+    }
+
     DWORD err = 0;
-    if (!PerformInstallCore(g_app.win32Dir, false, err)) {
+    const bool ok = useRemote
+        ? PerformInstallFromBytes(g_app.win32Dir, downloaded.data(), static_cast<DWORD>(downloaded.size()), false, err)
+        : PerformInstallCore(g_app.win32Dir, false, err);
+    if (!ok) {
         if (err == ERROR_ACCESS_DENIED) {
-            if (!RunElevatedCommand(L"--install-keep \"" + g_app.win32Dir + L"\"")) {
+            bool elevOk = false;
+            if (useRemote) {
+                wchar_t tmpDir[MAX_PATH]{};
+                wchar_t tmpFile[MAX_PATH]{};
+                if (GetTempPathW(MAX_PATH, tmpDir) && GetTempFileNameW(tmpDir, L"smu", 0, tmpFile)) {
+                    DWORD wErr = 0;
+                    if (WriteBytesAtomic(tmpFile, downloaded.data(), static_cast<DWORD>(downloaded.size()), wErr)) {
+                        elevOk = RunElevatedCommand(L"--install-file \"" + g_app.win32Dir + L"\" \"" + tmpFile + L"\"");
+                    }
+                    DeleteFileW(tmpFile);
+                }
+            } else {
+                elevOk = RunElevatedCommand(L"--install-keep \"" + g_app.win32Dir + L"\"");
+            }
+            if (!elevOk) {
                 MessageBoxW(g_app.hwnd,
                             L"Write access denied. Please approve Administrator access when prompted.",
                             kAppTitle, MB_ICONERROR | MB_OK);
@@ -447,7 +776,7 @@ bool DoInstall(bool quietSuccess = false) {
         }
     }
     RefreshStatus();
-    if (!quietSuccess) SetFeedback(L"Mod installed.");
+    if (!quietSuccess) SetFeedback(useRemote ? (L"Updated to " + g_app.remote.tag + L".") : L"Mod installed.");
     return true;
 }
 
@@ -626,7 +955,22 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             SetWindowTextW(GetDlgItem(hwnd, IDC_EDIT_PATH), g_app.win32Dir.c_str());
         }
         RefreshStatus();
+        if (HANDLE ht = CreateThread(nullptr, 0, &RemoteCheckThread, hwnd, 0, nullptr)) {
+            CloseHandle(ht);
+        }
         return 0;
+
+    case WM_APP_REMOTE_CHECK: {
+        auto* info = reinterpret_cast<RemoteReleaseInfo*>(lp);
+        if (info) {
+            if (info->valid) {
+                g_app.remote = std::move(*info);
+                RefreshStatus();
+            }
+            delete info;
+        }
+        return 0;
+    }
 
     case WM_PAINT: {
         PAINTSTRUCT ps{};
@@ -735,6 +1079,11 @@ int HandleElevatedCli(int argc, LPWSTR* argv) {
         std::wstring dir = NormalizeWin32Dir(argv[2]);
         if (dir.empty()) return 1;
         return PerformInstallCore(dir, cmd == L"--install-fresh", err) ? 0 : 1;
+    }
+    if (cmd == L"--install-file" && argc >= 4) {
+        std::wstring dir = NormalizeWin32Dir(argv[2]);
+        if (dir.empty()) return 1;
+        return PerformInstallFromFile(dir, argv[3], false, err) ? 0 : 1;
     }
     if (cmd == L"--uninstall") {
         std::wstring dir = NormalizeWin32Dir(argv[2]);
