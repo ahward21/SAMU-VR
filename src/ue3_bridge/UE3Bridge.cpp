@@ -496,12 +496,30 @@ std::string_view OutermostAnsiName(const UObject* obj) {
 
 std::atomic<bool>    g_gameplayActive{false};
 std::atomic<bool>    g_gamePaused{false};
+std::atomic<bool>    g_cinematicScreenActive{false};
+std::atomic<bool>    g_cinematicModeActive{false};
+std::atomic<bool>    g_fullscreenPopupActive{false};
+std::atomic<bool>    g_inStoryMode{false};
 std::atomic<int64_t> g_lastGameplayTickMs{0};
 std::atomic<int64_t> g_pauseStartedMs{0};
+UBoolProperty*       g_propCinematicMode = nullptr;
+
+void RefreshCinematicScreenState() {
+    const bool cin = g_fullscreenPopupActive.load(std::memory_order_relaxed) ||
+                     g_cinematicModeActive.load(std::memory_order_relaxed);
+    const bool prev = g_cinematicScreenActive.exchange(cin, std::memory_order_relaxed);
+    if (prev != cin) {
+        LOG_INFO("UE3Bridge: display -> %s (fullscreenLogo=%d cinematicMode=%d)",
+                 cin ? "CINEMA SCREEN (cutscene/title)" : "IMMERSIVE VR",
+                 g_fullscreenPopupActive.load(std::memory_order_relaxed) ? 1 : 0,
+                 g_cinematicModeActive.load(std::memory_order_relaxed) ? 1 : 0);
+    }
+}
 
 bool IsGameplayActiveNow() {
     return g_gameplayActive.load(std::memory_order_relaxed) &&
            !g_gamePaused.load(std::memory_order_relaxed) &&
+           !g_cinematicScreenActive.load(std::memory_order_relaxed) &&
            (SteadyNowMs() - g_lastGameplayTickMs.load(std::memory_order_relaxed)) < 1000;
 }
 
@@ -533,6 +551,8 @@ bool HasSuperClassNamed(const UStruct* cls, std::atomic<int32_t>& cachedFnameIdx
     return false;
 }
 
+UProperty* FindPropertyInClassChain(UStruct* cls, const char* name, const char* propClass);
+
 bool IsPlayerControllerInstance(const UObject* obj) {
     return IsLiveUObject(obj) &&
            obj->Class->PropertiesSize >= static_cast<int32_t>(offsets::kPC_MinSize) &&
@@ -552,6 +572,19 @@ bool EvaluateGameplayState(UObject* pcObj, std::string_view& mapName) {
         }
     }
     if (gameplay) {
+        if (!g_propCinematicMode) {
+            g_propCinematicMode = static_cast<UBoolProperty*>(
+                FindPropertyInClassChain(pcObj->Class, "bCinematicMode", "BoolProperty"));
+        }
+        bool cinMode = false;
+        if (g_propCinematicMode) {
+            const uint32_t bits = *reinterpret_cast<const uint32_t*>(
+                reinterpret_cast<const uint8_t*>(pcObj) + g_propCinematicMode->Offset);
+            cinMode = (bits & g_propCinematicMode->BitMask) != 0;
+        }
+        g_cinematicModeActive.store(cinMode, std::memory_order_relaxed);
+        RefreshCinematicScreenState();
+
         const int64_t nowMs = SteadyNowMs();
         g_lastGameplayTickMs.store(nowMs, std::memory_order_relaxed);
         // Safety fallback: if PlayerTick resumed after pause (>250ms) and CompletePauseMenuClose was missed, clear pause.
@@ -564,6 +597,10 @@ bool EvaluateGameplayState(UObject* pcObj, std::string_view& mapName) {
         }
     } else {
         g_gamePaused.store(false, std::memory_order_relaxed);
+        g_cinematicModeActive.store(false, std::memory_order_relaxed);
+        g_fullscreenPopupActive.store(false, std::memory_order_relaxed);
+        g_cinematicScreenActive.store(false, std::memory_order_relaxed);
+        g_inStoryMode.store(false, std::memory_order_relaxed);
     g_stickSprintLatched     = false;
     g_prevLeftStickClick     = false;
     }
@@ -964,15 +1001,18 @@ struct HandRig {
     UProperty* propChild2Target = nullptr;   // AnimNodeBlend.Child2WeightTarget (FloatProperty)
     UFunction* fnSetBlendTarget = nullptr;   // AnimNodeBlend.SetBlendTarget(BlendTarget, BlendTime)
     UObject*   mesh             = nullptr;   // mesh the state below belongs to
-    int        learnFrames      = 0;
-    bool       learned          = false;
+    int        learnFrames       = 0;
+    bool       learned           = false;
     FVector    socketLocal{};                // palm socket position in the mesh's own frame (at appliedScale)
-    float      appliedScale     = 1.0f;
-    bool       havePrev         = false;
-    uint64_t   lastLearnFrame   = 0;
+    float      appliedScale      = 1.0f;
+    bool       havePrev          = false;
+    uint64_t   lastLearnFrame    = 0;
     FVector    prevHand{};                   // previous visual palm target (used for Phase 2 closed-loop)
+    FVector    prevEyeLoc{};
     FRotator   prevRot{};
-    int64_t    lastLogMs        = 0;
+    bool       wasInStoryMode    = false;
+    int        recalibrateFrames = 0;
+    int64_t    lastLogMs         = 0;
 } g_handRig;
 
 // ---- Script-side aim ----
@@ -1017,10 +1057,13 @@ struct HudRig {
     UProperty* propBgMultiMC   = nullptr;      // ASAMUHUDMovie.BgMultiMC (GFxObject)
     UProperty* propPopupTF     = nullptr;      // ASAMUHUDMovie.PopupTF (GFxClikWidget)
     UBoolProperty* propMovieHidden = nullptr;  // ASAMUHUDMovie.bHidden
-    UBoolProperty* propPauseFade   = nullptr;  // ASAMUHUD.bPauseMenuFade
-    UProperty*     propPauseMovie  = nullptr;  // ASAMUHUD.PauseMenuASAMU
-    UBoolProperty* propMovieIsOpen = nullptr;  // GFxMoviePlayer.bMovieIsOpen
-    UProperty* propCrosshairState = nullptr;   // ASAMUHUD.CurrentCrosshair (enum CrosshairTypes)
+    UBoolProperty* propPauseFade       = nullptr;  // ASAMUHUD.bPauseMenuFade
+    UBoolProperty* propFullscreenPopup = nullptr;  // ASAMUHUD.bFullscreenpopup
+    UBoolProperty* propHudStoryMode    = nullptr;  // ASAMUHUD.bHUDStoryMode
+    UProperty*     propPauseMovie      = nullptr;  // ASAMUHUD.PauseMenuASAMU
+    UBoolProperty* propMovieIsOpen     = nullptr;  // GFxMoviePlayer.bMovieIsOpen
+    UProperty* propCrosshairState      = nullptr;  // ASAMUHUD.CurrentCrosshair (enum CrosshairTypes)
+    UFunction* fnPopCurrentTutorial    = nullptr;  // ASAMUHUD.PopCurrentTutorial()
     UFunction* fnSetVisible    = nullptr;      // GFxObject.SetVisible
     UFunction* fnGetPosition   = nullptr;      // GFxObject.GetPosition(out float x, out float y) -> bool
     UFunction* fnSetPosition   = nullptr;      // GFxObject.SetPosition(float x, float y)
@@ -1502,6 +1545,14 @@ void Apply6DofGloveTransformToWeapon(UObject* weaponObj, UObject* holderOverride
     FVector socketWorld{};
     const bool socketOk = QuerySocketWorld(mesh, socket, socketWorld);
 
+    const bool inStory = g_inStoryMode.load(std::memory_order_relaxed);
+    if (rig.wasInStoryMode && !inStory) {
+        rig.recalibrateFrames = 45;
+        rig.havePrev          = false;
+        LOG_INFO("UE3Bridge: exited story mode -> fast hand-rig recalibration active");
+    }
+    rig.wasInStoryMode = inStory;
+
     if (!rig.learned) {
         // Phase 1: leave the game's placement alone for a few frames and measure where the palm socket sits
         // relative to the view. First-person arm meshes are authored around the camera, so this is (close to)
@@ -1510,9 +1561,11 @@ void Apply6DofGloveTransformToWeapon(UObject* weaponObj, UObject* holderOverride
             const FVector d{socketWorld.X - cam.finalLocation.X, socketWorld.Y - cam.finalLocation.Y, socketWorld.Z - cam.finalLocation.Z};
             rig.socketLocal = UnrotateByBasis(BasisFromRotator(cam.finalRotation), d);
             rig.learned = true;
+            rig.recalibrateFrames = inStory ? 0 : 30;
             HideLeftArmBones(mesh);
-            LOG_INFO("UE3Bridge: hand rig learned: palm socket '%s' sits at (%.1f, %.1f, %.1f) UU in view space",
-                     SdkDumper::NameToString(g_gnames, socket).c_str(), rig.socketLocal.X, rig.socketLocal.Y, rig.socketLocal.Z);
+            LOG_INFO("UE3Bridge: hand rig learned: palm socket '%s' sits at (%.1f, %.1f, %.1f) UU in view space%s",
+                     SdkDumper::NameToString(g_gnames, socket).c_str(), rig.socketLocal.X, rig.socketLocal.Y, rig.socketLocal.Z,
+                     inStory ? " (story mode)" : "");
         }
         return;
     }
@@ -1557,20 +1610,26 @@ void Apply6DofGloveTransformToWeapon(UObject* weaponObj, UObject* holderOverride
 
     const FVector visualHandLoc = ApplyVisualHandErgonomicOffset(handLoc, handRot, samu::config::GetWorldScale());
 
-    // Phase 2 (closed loop, SetPosition pass only): refine socketLocal gently while practically stationary so
-    // transient high-speed falls or landing animations can never pull the hand rig off-center.
+    // Phase 2 (closed loop, SetPosition pass only): refine socketLocal whenever the pawn isn't flying at high speed
+    // and we aren't in a lowered story animation, so exiting a talk/story event or anim blend always re-aligns the glove.
     float errLen = 0.0f;
     if (rig.havePrev && socketOk && holderOverride != nullptr && rig.lastLearnFrame != g_gameFrameIdx) {
         rig.lastLearnFrame = g_gameFrameIdx;
         const FVector e{socketWorld.X - rig.prevHand.X, socketWorld.Y - rig.prevHand.Y, socketWorld.Z - rig.prevHand.Z};
         errLen = std::sqrt(e.X * e.X + e.Y * e.Y + e.Z * e.Z);
-        const float mx = visualHandLoc.X - rig.prevHand.X, my = visualHandLoc.Y - rig.prevHand.Y, mz = visualHandLoc.Z - rig.prevHand.Z;
-        if (errLen < 12.0f && (mx * mx + my * my + mz * mz) < 0.25f) {
+        const float ex = cam.finalLocation.X - rig.prevEyeLoc.X;
+        const float ey = cam.finalLocation.Y - rig.prevEyeLoc.Y;
+        const float ez = cam.finalLocation.Z - rig.prevEyeLoc.Z;
+        const float eyeDeltaSq = ex * ex + ey * ey + ez * ez;
+        const float maxEyeSq   = (rig.recalibrateFrames > 0) ? 100.0f : 16.0f;
+        const float blendGain  = (rig.recalibrateFrames > 0) ? 0.45f  : 0.30f;
+        if (!inStory && errLen < 60.0f && eyeDeltaSq < maxEyeSq) {
             const FVector eLocal = UnrotateByBasis(BasisFromRotator(rig.prevRot), e);
-            rig.socketLocal.X += eLocal.X * 0.35f;
-            rig.socketLocal.Y += eLocal.Y * 0.35f;
-            rig.socketLocal.Z += eLocal.Z * 0.35f;
+            rig.socketLocal.X += eLocal.X * blendGain;
+            rig.socketLocal.Y += eLocal.Y * blendGain;
+            rig.socketLocal.Z += eLocal.Z * blendGain;
         }
+        if (rig.recalibrateFrames > 0) --rig.recalibrateFrames;
     }
 
     const FVector off = RotateByBasis(BasisFromRotator(handRot), rig.socketLocal);
@@ -1582,9 +1641,10 @@ void Apply6DofGloveTransformToWeapon(UObject* weaponObj, UObject* holderOverride
     FRotator rParm = handRot;
     g_origProcessEvent(mesh, rig.fnSetTranslation, &tParm, nullptr);
     g_origProcessEvent(mesh, rig.fnSetRotation, &rParm, nullptr);
-    rig.prevHand = visualHandLoc;
-    rig.prevRot  = handRot;
-    rig.havePrev = true;
+    rig.prevHand   = visualHandLoc;
+    rig.prevEyeLoc = cam.finalLocation;
+    rig.prevRot    = handRot;
+    rig.havePrev   = true;
 
     const int64_t nowMs = SteadyNowMs();
     if (nowMs - rig.lastLogMs > 3000) {
@@ -1917,14 +1977,21 @@ void UpdateHudForVr(UObject* pcObj) {
     h.lastHud = hud;
 
     if ((!h.resolved || !h.propPopupsMC || !h.propBgSingleMC || !h.propBgMultiMC || !h.propPopupTF ||
-         !h.propPauseFade || !h.propPauseMovie || !h.fnGetPosition || !h.fnSetPosition ||
+         !h.propPauseFade || !h.propFullscreenPopup || !h.propHudStoryMode || !h.propPauseMovie ||
+         !h.fnPopCurrentTutorial || !h.fnGetPosition || !h.fnSetPosition ||
          !h.fnGetFloat || !h.fnSetFloat || !h.fnGetString || !h.fnSetString) &&
         nowMs - h.lastResolveMs > 1000) {
         h.lastResolveMs = nowMs;
-        if (!h.propHudMovie)       h.propHudMovie       = FindPropertyInClassChain(hud->Class, "HudMovie", "ObjectProperty");
-        if (!h.propPauseFade)      h.propPauseFade      = static_cast<UBoolProperty*>(FindPropertyInClassChain(hud->Class, "bPauseMenuFade", "BoolProperty"));
-        if (!h.propPauseMovie)     h.propPauseMovie     = FindPropertyInClassChain(hud->Class, "PauseMenuASAMU", "ObjectProperty");
-        if (!h.propCrosshairState) h.propCrosshairState = FindPropertyInClassChain(hud->Class, "CurrentCrosshair", "ByteProperty");
+        if (!h.propHudMovie)        h.propHudMovie        = FindPropertyInClassChain(hud->Class, "HudMovie", "ObjectProperty");
+        if (!h.propPauseFade)       h.propPauseFade       = static_cast<UBoolProperty*>(FindPropertyInClassChain(hud->Class, "bPauseMenuFade", "BoolProperty"));
+        if (!h.propFullscreenPopup) h.propFullscreenPopup = static_cast<UBoolProperty*>(FindPropertyInClassChain(hud->Class, "bFullscreenpopup", "BoolProperty"));
+        if (!h.propHudStoryMode)    h.propHudStoryMode    = static_cast<UBoolProperty*>(FindPropertyInClassChain(hud->Class, "bHUDStoryMode", "BoolProperty"));
+        if (!h.propPauseMovie)      h.propPauseMovie      = FindPropertyInClassChain(hud->Class, "PauseMenuASAMU", "ObjectProperty");
+        if (!h.propCrosshairState)  h.propCrosshairState  = FindPropertyInClassChain(hud->Class, "CurrentCrosshair", "ByteProperty");
+        if (!h.fnPopCurrentTutorial) {
+            h.fnPopCurrentTutorial = FindFunction("PopCurrentTutorial", "ASAMUHUD");
+            if (h.fnPopCurrentTutorial && h.fnPopCurrentTutorial->ParmsSize != 0) h.fnPopCurrentTutorial = nullptr;
+        }
         if (!h.fnSetVisible) {
             h.fnSetVisible = FindFunction("SetVisible", "GFxObject");
             if (h.fnSetVisible && h.fnSetVisible->ParmsSize != 0x04) h.fnSetVisible = nullptr;
@@ -2090,6 +2157,14 @@ void UpdateHudForVr(UObject* pcObj) {
             if (gs.ReturnValue.Data && gs.ReturnValue.Num > 1 && gs.ReturnValue.Num < 512) {
                 std::wstring txt(gs.ReturnValue.Data, static_cast<size_t>(gs.ReturnValue.Num - 1));
                 if (!txt.empty() && txt != h.lastVrPopupText) {
+                    std::wstring upperCheck = txt;
+                    std::transform(upperCheck.begin(), upperCheck.end(), upperCheck.begin(), ::towupper);
+                    if (upperCheck.find(L"TO ZOOM") != std::wstring::npos && h.fnPopCurrentTutorial) {
+                        g_origProcessEvent(hud, h.fnPopCurrentTutorial, nullptr, nullptr);
+                        h.lastVrPopupText = txt;
+                        LOG_INFO("UE3Bridge: dismissed flat-screen zoom tutorial popup in VR");
+                        return;
+                    }
                     std::wstring out = txt;
                     auto replaceCI = [&](const std::wstring& needle, const std::wstring& repl) {
                         std::wstring upperOut = out, upperN = needle;
@@ -2231,9 +2306,9 @@ void UpdateHudForVr(UObject* pcObj) {
     }
 }
 
-// Motion blur is computed from how far the camera turned since the previous frame, i.e. it smears the whole
-// picture on every head turn (and, with alternate-frame stereo, between the two eye positions). Switch it off
-// through the game's own settings object, exactly like unticking "Motion blur" in the options menu.
+// Motion blur, light shafts, lens flares, SSAO, and wide screen-space bloom cause smearing and
+// noticeable scene brightness drops whenever the player turns their head in VR. Switch them off via
+// ASAMUSystemSettingsManager and gently tame post-process chain effects so lighting stays consistent.
 void DisableGameMotionBlur() {
     if (!samu::config::Get().disableMotionBlur || !g_origProcessEvent || !g_gobjects || !g_gobjects->Data) return;
     UFunction* fnGet = FindFunction("GetBoolSetting", "ASAMUSystemSettingsManager");
@@ -2247,37 +2322,101 @@ void DisableGameMotionBlur() {
         mgr = obj;   // keep the newest instance
     }
     if (!mgr || !fnGet || !fnSet || fnGet->ParmsSize != 0x14 || fnSet->ParmsSize != 0x14) {
-        LOG_WARN("UE3Bridge: motion blur left as is (settings manager=%p, Get=%p(0x%X), Set=%p(0x%X)). "
-                 "Untick 'Motion blur' in the game's options instead.",
-                 static_cast<void*>(mgr), static_cast<void*>(fnGet), fnGet ? fnGet->ParmsSize : 0,
-                 static_cast<void*>(fnSet), fnSet ? fnSet->ParmsSize : 0);
-        return;
+        LOG_WARN("UE3Bridge: settings manager not ready for VR graphics tweaks (%p)", static_cast<void*>(mgr));
+    } else {
+        auto disableBoolSetting = [&](const wchar_t* settingName) {
+            const int32_t nameLen = static_cast<int32_t>(std::wcslen(settingName)) + 1;
+            struct { FString Name; uint8_t Out; uint8_t Pad[3]; uint32_t Ret; } gp{};
+            gp.Name.Data = const_cast<wchar_t*>(settingName);
+            gp.Name.Num  = nameLen;
+            gp.Name.Max  = nameLen;
+            gp.Out       = 0xFF;
+            g_origProcessEvent(mgr, fnGet, &gp, nullptr);
+            const bool gotBefore = (gp.Ret != 0);
+            if (gotBefore && gp.Out == 0) return;
+
+            struct { FString Name; uint32_t Value; uint32_t Ret; } sp{};
+            sp.Name.Data = const_cast<wchar_t*>(settingName);
+            sp.Name.Num  = nameLen;
+            sp.Name.Max  = nameLen;
+            sp.Value     = 0;
+            g_origProcessEvent(mgr, fnSet, &sp, nullptr);
+            LOG_INFO("UE3Bridge: SystemSetting '%ls': was %d (ok=%d) -> 0 (accepted=%d)",
+                     settingName, static_cast<int>(gp.Out), gotBefore ? 1 : 0, sp.Ret != 0 ? 1 : 0);
+        };
+        for (const wchar_t* s : {
+                 L"MotionBlur",
+                 L"MotionBlurPause",
+                 L"bAllowLightShafts",
+                 L"LensFlares",
+                 L"AmbientOcclusion",
+                 L"DepthOfField",
+                 L"AllowRadialBlur",
+                 L"OneFrameThreadLag",
+             }) {
+            disableBoolSetting(s);
+        }
     }
-    static wchar_t s_name[] = L"MotionBlur";
-    const int32_t nameLen = static_cast<int32_t>(std::wcslen(s_name)) + 1;
-    auto get = [&](int& value) {
-        struct { FString Name; uint8_t Out; uint8_t Pad[3]; uint32_t Ret; } p{};
-        static_assert(sizeof(p) == 0x14, "GetBoolSetting parms");
-        p.Name.Data = s_name; p.Name.Num = nameLen; p.Name.Max = nameLen;
-        p.Out = 0xFF;
-        g_origProcessEvent(mgr, fnGet, &p, nullptr);
-        value = p.Out;
-        return p.Ret != 0;
-    };
-    int before = -1, after = -1;
-    const bool gotBefore = get(before);
-    if (gotBefore && before == 0) {
-        LOG_INFO("UE3Bridge: motion blur is already off.");
-        return;
+
+    // Tame live post-process chain effects so head-turns don't trigger sudden brightness/vignette shifts.
+    static std::atomic<int32_t> s_ppIdx{-1};
+    static std::atomic<int32_t> s_aoIdx{-1};
+    static std::atomic<int32_t> s_mbIdx{-1};
+    static std::atomic<int32_t> s_matIdx{-1};
+    static std::atomic<int32_t> s_dofBloomIdx{-1};
+    static std::atomic<int32_t> s_uberIdx{-1};
+    for (int32_t i = 0; i < g_gobjects->Num; ++i) {
+        UObject* obj = g_gobjects->Data[i];
+        if (!obj || !obj->Class) continue;
+        if (!HasSuperClassNamed(obj->Class, s_ppIdx, "PostProcessEffect")) continue;
+        if (SdkDumper::NameToString(g_gnames, obj->Name).rfind("Default__", 0) == 0) continue;
+
+        auto* showProp = static_cast<UBoolProperty*>(FindPropertyInClassChain(obj->Class, "bShowInGame", "BoolProperty"));
+        if (!showProp) continue;
+        auto* bits = reinterpret_cast<uint32_t*>(reinterpret_cast<uint8_t*>(obj) + showProp->Offset);
+        const bool wasShown = (*bits & showProp->BitMask) != 0;
+
+        const std::string path = SdkDumper::GetFullObjectPath(g_gnames, obj);
+        std::string lower = path;
+        std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+
+        if (HasSuperClassNamed(obj->Class, s_aoIdx, "AmbientOcclusionEffect") ||
+            HasSuperClassNamed(obj->Class, s_mbIdx, "MotionBlurEffect") ||
+            (HasSuperClassNamed(obj->Class, s_matIdx, "MaterialEffect") &&
+             (lower.find("vignette") != std::string::npos || lower.find("blur") != std::string::npos))) {
+            if (wasShown) {
+                *bits &= ~showProp->BitMask;
+                LOG_INFO("UE3Bridge: PostProcessEffect disabled: %s", path.c_str());
+            }
+            continue;
+        }
+
+        if (wasShown && HasSuperClassNamed(obj->Class, s_dofBloomIdx, "DOFAndBloomEffect")) {
+            if (UProperty* pBloom = FindPropertyInClassChain(obj->Class, "BloomScale", "FloatProperty")) {
+                auto* v = reinterpret_cast<float*>(reinterpret_cast<uint8_t*>(obj) + pBloom->Offset);
+                if (*v > 0.35f) {
+                    LOG_INFO("UE3Bridge: %s BloomScale %.2f -> 0.35", path.c_str(), *v);
+                    *v = 0.35f;
+                }
+            }
+        }
+        if (wasShown && HasSuperClassNamed(obj->Class, s_uberIdx, "UberPostProcessEffect")) {
+            if (UProperty* pLarge = FindPropertyInClassChain(obj->Class, "BloomWeightLarge", "FloatProperty")) {
+                auto* v = reinterpret_cast<float*>(reinterpret_cast<uint8_t*>(obj) + pLarge->Offset);
+                if (*v > 0.15f) {
+                    LOG_INFO("UE3Bridge: %s BloomWeightLarge %.2f -> 0.15", path.c_str(), *v);
+                    *v = 0.15f;
+                }
+            }
+            if (UProperty* pToe = FindPropertyInClassChain(obj->Class, "TonemapperToeFactor", "FloatProperty")) {
+                auto* v = reinterpret_cast<float*>(reinterpret_cast<uint8_t*>(obj) + pToe->Offset);
+                if (*v > 0.25f) {
+                    LOG_INFO("UE3Bridge: %s TonemapperToeFactor %.2f -> 0.25", path.c_str(), *v);
+                    *v = 0.25f;
+                }
+            }
+        }
     }
-    struct { FString Name; uint32_t Value; uint32_t Ret; } sp{};
-    static_assert(sizeof(sp) == 0x14, "SetBoolSetting parms");
-    sp.Name.Data = s_name; sp.Name.Num = nameLen; sp.Name.Max = nameLen;
-    sp.Value = 0;
-    g_origProcessEvent(mgr, fnSet, &sp, nullptr);
-    const bool gotAfter = get(after);
-    LOG_INFO("UE3Bridge: motion blur: was %d (read ok=%d) -> set off (accepted=%d) -> now %d (read ok=%d)",
-             before, gotBefore ? 1 : 0, sp.Ret != 0 ? 1 : 0, after, gotAfter ? 1 : 0);
 }
 
 // Raises UE3's smoothed frame-rate cap (GameEngine.bSmoothFrameRate / MaxSmoothedFrameRate, default 62 Hz)
@@ -2330,6 +2469,8 @@ void ApplyEngineTweaks(UObject* pcObj, std::string_view mapName) {
             for (const wchar_t* cmd : {
                      L"Scale set MotionBlur False",
                      L"Scale set MotionBlurPause False",
+                     L"Scale set bAllowLightShafts False",
+                     L"Scale set LensFlares False",
                      L"Scale set DepthOfField False",
                      L"Scale set AmbientOcclusion False",
                      L"Scale set AllowRadialBlur False",
@@ -2427,17 +2568,23 @@ void BeginGameplayFrame(UObject* pcObj, std::string_view mapName, bool inSelfTes
     PushFrameTag(g_framePose.sampleId, g_frameEye);
     ApplyEngineTweaks(pcObj, mapName);
 
-    UObject* piObj = *reinterpret_cast<UObject* const*>(reinterpret_cast<uint8_t*>(pcObj) + offsets::kPC_PlayerInput);
-    if (piObj) InjectLocomotionIntoPlayerInput(piObj, LocomotionRelativeYaw());
+    if (!g_cinematicScreenActive.load(std::memory_order_relaxed)) {
+        UObject* piObj = *reinterpret_cast<UObject* const*>(reinterpret_cast<uint8_t*>(pcObj) + offsets::kPC_PlayerInput);
+        if (piObj) InjectLocomotionIntoPlayerInput(piObj, LocomotionRelativeYaw());
 
-    // Re-assert the hand aim with the newest controller pose before the game's own scripts run this tick.
-    UpdateScriptAim(pcObj);
+        // Re-assert the hand aim with the newest controller pose before the game's own scripts run this tick.
+        UpdateScriptAim(pcObj);
+    }
 }
 
 void EndGameplayFrames() {
     if (g_framePoseValid) ClearFrameTags();
     DestroyLeftHandActor();
     g_gamePaused.store(false, std::memory_order_relaxed);
+    g_cinematicModeActive.store(false, std::memory_order_relaxed);
+    g_fullscreenPopupActive.store(false, std::memory_order_relaxed);
+    g_cinematicScreenActive.store(false, std::memory_order_relaxed);
+    g_inStoryMode.store(false, std::memory_order_relaxed);
     g_stickSprintLatched     = false;
     g_prevLeftStickClick     = false;
     g_bodyYawValid           = false;
@@ -3067,13 +3214,16 @@ void __fastcall Detour_ProcessEvent(UObject* self, void* /*edx*/, UFunction* fun
     if (isPlayerTick) {
         if (!IsPlayerControllerInstance(self)) return;
         if (tickGameplay) {
-            if (samu::config::IsCameraLockSuppressorEnabled()) {
-                SuppressActiveCameraShakesOnPC(self);
+            const bool cinemaActive = g_cinematicScreenActive.load(std::memory_order_relaxed);
+            if (!cinemaActive) {
+                if (samu::config::IsCameraLockSuppressorEnabled()) {
+                    SuppressActiveCameraShakesOnPC(self);
+                }
+                Apply6DofCameraToPlayerController(self);
+                ProcessControllerActionsOnPC(self, inSelfTest);
             }
-            Apply6DofCameraToPlayerController(self);
-            ProcessControllerActionsOnPC(self, inSelfTest);
             if (!inSelfTest) UpdateHudForVr(self);
-            if (!inSelfTest) MeasureViewProjection();
+            if (!inSelfTest && !cinemaActive) MeasureViewProjection();
         }
 
         uint64_t tickNum = ++g_playerTicks;
@@ -3151,6 +3301,15 @@ void __fastcall Detour_ProcessEvent(UObject* self, void* /*edx*/, UFunction* fun
                     }
                 }
             }
+            if (g_hudRig.propFullscreenPopup) {
+                const uint32_t bits = *reinterpret_cast<const uint32_t*>(hudRaw + g_hudRig.propFullscreenPopup->Offset);
+                g_fullscreenPopupActive.store((bits & g_hudRig.propFullscreenPopup->BitMask) != 0, std::memory_order_relaxed);
+            }
+            if (g_hudRig.propHudStoryMode) {
+                const uint32_t bits = *reinterpret_cast<const uint32_t*>(hudRaw + g_hudRig.propHudStoryMode->Offset);
+                g_inStoryMode.store((bits & g_hudRig.propHudStoryMode->BitMask) != 0, std::memory_order_relaxed);
+            }
+            RefreshCinematicScreenState();
             const bool prevPaused = g_gamePaused.exchange(pausedNow, std::memory_order_relaxed);
             if (pausedNow && !prevPaused) {
                 g_pauseStartedMs.store(SteadyNowMs(), std::memory_order_relaxed);

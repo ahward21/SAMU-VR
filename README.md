@@ -62,42 +62,41 @@ During the main menu, loading screens, and pause menu, the game switches automat
 Press **Right Stick Click (`R3`)** or **`F10`** on the keyboard at any time to open the floating VR Settings overlay:
 - **Control it** by pointing your right controller laser and pulling **Trigger** (drag sliders or click toggles), or navigate with **Thumbstick + A** (`B` / `Menu` closes it).
 - **Available settings:**
-  - `View Scale (1=Full)` — trim FOV/zoom scale (`0.70` – `1.15`)
+  - `View Scale` — trim FOV/zoom scale (`0.70` – `1.15`)
   - `Image Sharpness` — D3D11 Contrast-Adaptive Sharpening (`0%` – `100%`, default `55%`)
-  - `Text / HUD Lift` — raises subtitles & Flash tutorial popups into comfortable VR view (`0%` – `100%`)
-  - `Crosshair Size` — hand reticle scale (`0.50x` – `2.00x`)
+  - `HUD & Subtitle Lift` — raises subtitles & Flash tutorial popups into comfortable VR view (`0%` – `100%`)
+  - `Reticle Size` — hand reticle scale (`0.50x` – `2.00x`)
   - `World Scale (UU/m)` — Unreal Units per meter (`30` – `100`, default `72`)
   - `Eye Height Offset` — manual vertical offset (`-30 cm` to `+30 cm`)
   - `Turn Speed` — right-stick smooth turn speed (`0.00x` – `2.50x`)
   - `Move Relative To` — `Head` / `Body` / `Left Hand`
-  - `Stereo Mode` — `MONO (Smooth)` / `AFR (3D)`
   - `Match Render Pose` — pose-matched compositor reprojection (`ON` / `OFF`)
   - `Cam-Lock Suppressor` — blocks scripted camera tilts/shakes (`ON` / `OFF`)
   - `Aim From Hand` — aim grapple from right controller vs head (`ON` / `OFF`)
   - `Hide Game Crosshair` — hides the center-screen HUD crosshair (`ON` / `OFF`)
-  - **Recenter View**, **Save Settings to `samu_vr.ini`**, **Close**
+  - **Recenter View**, **Save Settings**, **Resume Game**
 
-### Keyboard & Gesture Shortcuts
+### Keyboard Shortcuts
 | Shortcut | Action |
 | :--- | :--- |
 | **`F6`** | Toggle Comfort Camera-Lock Suppressor |
 | **`F7`** | Recenter HMD position/yaw & virtual screen |
 | **`F8`** | Toggle forced flat-screen mode |
-| **`F9`** or **`Both Grips + A/X`** | Toggle `MONO (Smooth)` ↔ `AFR (3D)` stereo mode |
+| **`F9`** | Experimental: Toggle `MONO` ↔ `AFR (3D)` (Mono is strongly recommended) |
 | **`F10`** or **`R3`** | Toggle in-headset VR Settings Menu |
 
 ---
 
 ## Known Issues & Limitations
 
-- **Mono is default (`StereoMode=0`); AFR 3D (`F9`) is optional:**
-  Unreal Engine 3 renders one camera view per frame. By default the mod runs in smooth full-rate Mono (with full 6DOF head tracking and 6DOF hand tracking) so framerate stays locked and crisp. Switching to **AFR (Alternate-Frame Rendering)** gives true stereoscopic 3D depth by alternating left and right eyes on consecutive frames, but cuts each eye's refresh rate in half and can shimmer on fast head turns.
+- **Mono rendering (`StereoMode=0`) is the standard mode:**
+  Unreal Engine 3 renders one camera view per frame. The mod runs in smooth full-rate Mono (with full 6DOF head tracking and 6DOF hand tracking) so parkour stays responsive and crisp. An experimental alternate-frame stereo mode (`F9` / `StereoMode=1` in `samu_vr.ini`) exists, but is buggy and halves per-eye refresh rate, so sticking to the default Mono mode is recommended.
 - **Right-handed grapple only (Left arm hidden by default):**
   The game's first-person viewmodel combines both arms in one skeletal mesh. Left-side arm bones are hidden by default so the left arm doesn't float awkwardly off your right hand. An experimental tracked left-hand mesh toggle exists in `samu_vr.ini` (`EnableLeftHand=1`).
 - **Desktop window must be in focus for menu input:**
   Virtual menu clicks and `Enter`/`Escape` presses are only sent while `ASAMU-Win32-Shipping.exe` is the foreground window. If another window steals focus, click the game window on your desktop once.
-- **Cutscenes / scripted cameras:**
-  When the game moves the camera far away from the player (`> 250 UU`) for scripted sequences or cinematics, the mod leaves that camera untouched so cinematics play normally without 6DOF tracking.
+- **Cutscenes & title screens:**
+  During scripted cinematics (`bCinematicMode`) and full-screen title cards (`bFullscreenpopup`), the mod automatically switches to the floating virtual cinema screen (`2.5 m` ahead) so cutscenes and logos aren't stuck close to your eyes, then smoothly transitions back into 6DOF VR when gameplay resumes.
 - **Antivirus / SmartScreen warnings:**
   `SAMU-VR-Launcher.exe` and the embedded `d3d9.dll` are unsigned binaries that hook DirectX 9 and engine functions (`ProcessEvent`), which can occasionally trigger heuristic warnings from Windows Defender or SmartScreen. You can inspect the entire codebase and build it yourself from source below.
 - **Logs for troubleshooting:**

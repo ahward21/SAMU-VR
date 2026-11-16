@@ -19,8 +19,8 @@ struct VrMenuUpdateResult {
 
 class VrSettingsMenu {
 public:
-    static constexpr uint32_t kWidth  = 768;
-    static constexpr uint32_t kHeight = 864;
+    static constexpr uint32_t kWidth  = 880;
+    static constexpr uint32_t kHeight = 980;
 
     void SetOpen(bool open);
     bool IsOpen() const { return m_open; }

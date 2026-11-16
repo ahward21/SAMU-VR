@@ -11,46 +11,35 @@
 namespace vr {
 namespace {
 
-constexpr int kRowCount   = 16;
-constexpr int kHeaderH    = 78;
-constexpr int kRowStartY  = 86;
-constexpr int kRowH       = 43;
-constexpr int kPadX       = 26;
-constexpr int kBarX0      = 360;
-constexpr int kBarX1      = 618;
+constexpr int kRowCount   = 15;
+constexpr int kHeaderH    = 88;
+constexpr int kRowStartY  = 104;
+constexpr int kRowH       = 51;
+constexpr int kPadX       = 44;
+constexpr int kBarX0      = 420;
+constexpr int kBarX1      = 706;
 
 struct Color {
     uint8_t r, g, b, a;
 };
 
-// A Story About My Uncle cavern-slate & luminous glove-cyan palette (subtle, modern, warm ivory typography).
-constexpr Color kColBgTop      {10,  18,  29, 245};
-constexpr Color kColBgBot      { 7,  13,  21, 246};
-constexpr Color kColBgHeader   {13,  25,  40, 248};
-constexpr Color kColBgFooter   { 9,  16,  26, 246};
-constexpr Color kColRowHover   {24,  46,  72, 242};
-constexpr Color kColRowIdle    {15,  26,  40, 215};
-constexpr Color kColBtnIdle    {20,  37,  58, 232};
-constexpr Color kColBtnHover   {31,  60,  92, 246};
-constexpr Color kColBorder     {44,  78, 108, 225};
-constexpr Color kColAccent     {108, 214, 245, 255};   // Grapple icy sky-cyan
-constexpr Color kColAccentSoft { 66, 166, 206, 235};
-constexpr Color kColWarmGold   {244, 198, 114, 255};   // Crystal/cave-torch warm highlight (ON/saved)
-constexpr Color kColTextHi     {238, 244, 250, 255};   // Warm chalk-white
-constexpr Color kColTextMid    {166, 190, 212, 255};   // Muted mist-slate
-constexpr Color kColTextDim    {124, 152, 178, 255};
-constexpr Color kColBarTrack   { 24,  38,  56, 255};
-constexpr Color kColBarFill    { 72, 176, 216, 255};
-
-float DistToSegment(float px, float py, float x1, float y1, float x2, float y2) {
-    const float dx = x2 - x1;
-    const float dy = y2 - y1;
-    const float lenSq = dx * dx + dy * dy;
-    const float t = (lenSq > 1e-5f) ? std::clamp(((px - x1) * dx + (py - y1) * dy) / lenSq, 0.0f, 1.0f) : 0.0f;
-    const float qx = x1 + dx * t - px;
-    const float qy = y1 + dy * t - py;
-    return std::sqrt(qx * qx + qy * qy);
-}
+// Minimalist dark charcoal-slate & warm lantern-amber palette matching A Story About My Uncle's UI.
+constexpr Color kColBgTop      {14,  15,  18, 232};
+constexpr Color kColBgBot      {10,  11,  14, 236};
+constexpr Color kColBorder     {255, 255, 255, 36};
+constexpr Color kColRule       {255, 255, 255, 30};
+constexpr Color kColRowHover   {255, 255, 255, 20};
+constexpr Color kColBtnIdle    {255, 255, 255, 10};
+constexpr Color kColBtnHover   {255, 255, 255, 28};
+constexpr Color kColBtnEdge    {255, 255, 255, 42};
+constexpr Color kColAccent     {232, 186, 108, 255};  // Warm amber-gold hover/active accent
+constexpr Color kColTextHi     {244, 244, 246, 255};  // Crisp chalk white
+constexpr Color kColTextMid    {186, 190, 198, 255};  // Clean neutral silver
+constexpr Color kColTextDim    {128, 134, 144, 255};  // Subtle muted gray
+constexpr Color kColBarTrack   {255, 255, 255, 34};
+constexpr Color kColBarIdle    {205, 210, 218, 230};
+constexpr Color kColToggleOn   {232, 186, 108, 255};
+constexpr Color kColToggleOff  {136, 142, 152, 255};
 
 float RoundedBoxSdf(float px, float py, float x0, float y0, float w, float h, float rad) {
     const float hx = w * 0.5f - rad;
@@ -70,7 +59,7 @@ public:
         m_rgba.assign(static_cast<size_t>(w) * h * 4, 0);
     }
 
-    void FillPanelGradient(float cornerRad) {
+    void FillPanelBackdrop(float cornerRad) {
         for (uint32_t py = 0; py < m_h; ++py) {
             const float ty = static_cast<float>(py) / static_cast<float>(m_h);
             const uint8_t br = static_cast<uint8_t>(kColBgTop.r + (kColBgBot.r - kColBgTop.r) * ty);
@@ -82,26 +71,13 @@ public:
                                                static_cast<float>(m_w), static_cast<float>(m_h), cornerRad);
                 const float cov = std::clamp(0.5f - sd, 0.0f, 1.0f);
                 if (cov <= 0.0f) continue;
-                uint8_t r = br, g = bg, b = bb;
-                // Subtle luminous blue ambient wash behind top header
-                const float dx = (px + 0.5f) - 180.0f;
-                const float dy = (py + 0.5f) - 42.0f;
-                const float gDist = std::sqrt(dx * dx + dy * dy);
-                if (gDist < 240.0f) {
-                    const float glow = (1.0f - gDist / 240.0f);
-                    const float wgt = glow * glow * 0.45f;
-                    r = static_cast<uint8_t>(std::min(255.0f, r + 18.0f * wgt));
-                    g = static_cast<uint8_t>(std::min(255.0f, g + 56.0f * wgt));
-                    b = static_cast<uint8_t>(std::min(255.0f, b + 82.0f * wgt));
+                SetRawBgra(px, py, Color{br, bg, bb, static_cast<uint8_t>(ba * cov)});
+                if (sd > -1.75f && sd <= 0.5f) {
+                    const float rim = std::clamp(1.0f - std::fabs(sd + 0.65f) / 1.1f, 0.0f, 1.0f);
+                    Color edge = kColBorder;
+                    edge.a = static_cast<uint8_t>(edge.a * rim * cov);
+                    BlendPixel(static_cast<int>(px), static_cast<int>(py), edge);
                 }
-                // Crisp outer slate-cyan rim
-                if (sd > -2.2f && sd <= 0.5f) {
-                    const float rim = std::clamp(1.0f - std::fabs(sd + 1.0f) / 1.4f, 0.0f, 1.0f);
-                    r = static_cast<uint8_t>(r + (kColBorder.r - r) * rim);
-                    g = static_cast<uint8_t>(g + (kColBorder.g - g) * rim);
-                    b = static_cast<uint8_t>(b + (kColBorder.b - b) * rim);
-                }
-                SetRawBgra(px, py, Color{r, g, b, static_cast<uint8_t>(ba * cov)});
             }
         }
     }
@@ -118,27 +94,26 @@ public:
         }
     }
 
-    void FillRoundedRect(float x, float y, float w, float h, float rad, Color fill,
-                         float borderW = 0.0f, Color border = Color{0, 0, 0, 0}) {
-        const int x0 = std::max(0, static_cast<int>(std::floor(x - 1.0f)));
-        const int y0 = std::max(0, static_cast<int>(std::floor(y - 1.0f)));
-        const int x1 = std::min(static_cast<int>(m_w), static_cast<int>(std::ceil(x + w + 1.0f)));
-        const int y1 = std::min(static_cast<int>(m_h), static_cast<int>(std::ceil(y + h + 1.0f)));
+    void FillRoundedRect(float x, float y, float w, float h, float rad, Color fill, float borderW = 0.0f, Color borderCol = {}) {
+        const int x0 = std::max(0, static_cast<int>(std::floor(x - 1.5f)));
+        const int y0 = std::max(0, static_cast<int>(std::floor(y - 1.5f)));
+        const int x1 = std::min(static_cast<int>(m_w), static_cast<int>(std::ceil(x + w + 1.5f)));
+        const int y1 = std::min(static_cast<int>(m_h), static_cast<int>(std::ceil(y + h + 1.5f)));
         for (int py = y0; py < y1; ++py) {
             for (int px = x0; px < x1; ++px) {
                 const float sd = RoundedBoxSdf(px + 0.5f, py + 0.5f, x, y, w, h, rad);
+                if (sd > 0.75f) continue;
                 const float fillCov = std::clamp(0.5f - sd, 0.0f, 1.0f);
                 if (fillCov > 0.0f && fill.a > 0) {
-                    Color c = fill;
-                    c.a = static_cast<uint8_t>(fill.a * fillCov);
-                    BlendPixel(px, py, c);
+                    Color sc = fill;
+                    sc.a = static_cast<uint8_t>(fill.a * fillCov);
+                    BlendPixel(px, py, sc);
                 }
-                if (borderW > 0.0f && border.a > 0 && sd > -(borderW + 1.0f) && sd < 1.0f) {
-                    const float inner = sd + borderW;
-                    const float edgeCov = std::clamp(0.5f - sd, 0.0f, 1.0f) * std::clamp(inner + 0.5f, 0.0f, 1.0f);
-                    if (edgeCov > 0.0f) {
-                        Color bc = border;
-                        bc.a = static_cast<uint8_t>(border.a * edgeCov);
+                if (borderW > 0.05f && borderCol.a > 0) {
+                    const float bCov = std::clamp(borderW * 0.5f + 0.5f - std::fabs(sd + borderW * 0.5f), 0.0f, 1.0f);
+                    if (bCov > 0.0f) {
+                        Color bc = borderCol;
+                        bc.a = static_cast<uint8_t>(borderCol.a * bCov);
                         BlendPixel(px, py, bc);
                     }
                 }
@@ -146,69 +121,11 @@ public:
         }
     }
 
-    void FillDiamond(float cx, float cy, float r, Color c) {
-        const int x0 = std::max(0, static_cast<int>(std::floor(cx - r - 2.0f)));
-        const int y0 = std::max(0, static_cast<int>(std::floor(cy - r - 2.0f)));
-        const int x1 = std::min(static_cast<int>(m_w), static_cast<int>(std::ceil(cx + r + 2.0f)));
-        const int y1 = std::min(static_cast<int>(m_h), static_cast<int>(std::ceil(cy + r + 2.0f)));
-        for (int py = y0; py < y1; ++py) {
-            for (int px = x0; px < x1; ++px) {
-                const float d = (std::fabs(px + 0.5f - cx) + std::fabs(py + 0.5f - cy)) * 0.70710678f;
-                const float cov = std::clamp(r * 0.70710678f + 0.5f - d, 0.0f, 1.0f);
-                if (cov > 0.0f) {
-                    Color sc = c;
-                    sc.a = static_cast<uint8_t>(c.a * cov);
-                    BlendPixel(px, py, sc);
-                }
-            }
-        }
-    }
-
-    // Draws ASAMU's signature open-right diamond crosshair icon cleanly with glow.
-    void DrawSamuCrosshairEmblem(float cx, float cy, float r) {
-        const int x0 = std::max(0, static_cast<int>(std::floor(cx - r - 8.0f)));
-        const int y0 = std::max(0, static_cast<int>(std::floor(cy - r - 8.0f)));
-        const int x1 = std::min(static_cast<int>(m_w), static_cast<int>(std::ceil(cx + r + 8.0f)));
-        const int y1 = std::min(static_cast<int>(m_h), static_cast<int>(std::ceil(cy + r + 8.0f)));
-        const float topX = cx, topY = cy - r * 0.85f;
-        const float botX = cx, botY = cy + r * 0.85f;
-        const float lftX = cx - r * 0.90f, lftY = cy;
-        const float trX  = cx + r * 0.55f, trY  = cy - r * 0.34f;
-        const float brX  = cx + r * 0.55f, brY  = cy + r * 0.34f;
-        const float tTipY = cy - r * 1.18f;
-        const float bTipY = cy + r * 1.18f;
-        const float rHookX = cx + r * 0.78f;
-        for (int py = y0; py < y1; ++py) {
-            for (int px = x0; px < x1; ++px) {
-                const float fx = px + 0.5f;
-                const float fy = py + 0.5f;
-                float d = DistToSegment(fx, fy, topX, topY, lftX, lftY);
-                d = std::min(d, DistToSegment(fx, fy, lftX, lftY, botX, botY));
-                d = std::min(d, DistToSegment(fx, fy, topX, topY, trX, trY));
-                d = std::min(d, DistToSegment(fx, fy, botX, botY, brX, brY));
-                d = std::min(d, DistToSegment(fx, fy, trX, trY, rHookX, cy - r * 0.52f));
-                d = std::min(d, DistToSegment(fx, fy, brX, brY, rHookX, cy + r * 0.52f));
-                d = std::min(d, DistToSegment(fx, fy, topX, tTipY, topX, topY));
-                d = std::min(d, DistToSegment(fx, fy, botX, botY, botX, bTipY));
-                const float dotD = std::sqrt((fx - cx) * (fx - cx) + (fy - cy) * (fy - cy)) - r * 0.14f;
-                d = std::min(d, std::max(0.0f, dotD));
-
-                const float core = std::clamp(1.75f - d, 0.0f, 1.0f);
-                const float halo = std::clamp(1.0f - d / 5.5f, 0.0f, 1.0f);
-                if (core > 0.0f) {
-                    BlendPixel(px, py, Color{225, 250, 255, static_cast<uint8_t>(245 * core)});
-                } else if (halo > 0.0f) {
-                    BlendPixel(px, py, Color{80, 200, 240, static_cast<uint8_t>(95 * halo * halo)});
-                }
-            }
-        }
-    }
-
     void FillCircle(float cx, float cy, float r, Color c) {
-        const int x0 = std::max(0, static_cast<int>(std::floor(cx - r - 1.0f)));
-        const int y0 = std::max(0, static_cast<int>(std::floor(cy - r - 1.0f)));
-        const int x1 = std::min(static_cast<int>(m_w), static_cast<int>(std::ceil(cx + r + 1.0f)));
-        const int y1 = std::min(static_cast<int>(m_h), static_cast<int>(std::ceil(cy + r + 1.0f)));
+        const int x0 = std::max(0, static_cast<int>(std::floor(cx - r - 1.5f)));
+        const int y0 = std::max(0, static_cast<int>(std::floor(cy - r - 1.5f)));
+        const int x1 = std::min(static_cast<int>(m_w), static_cast<int>(std::ceil(cx + r + 1.5f)));
+        const int y1 = std::min(static_cast<int>(m_h), static_cast<int>(std::ceil(cy + r + 1.5f)));
         for (int py = y0; py < y1; ++py) {
             for (int px = x0; px < x1; ++px) {
                 const float d = std::sqrt((px + 0.5f - cx) * (px + 0.5f - cx) + (py + 0.5f - cy) * (py + 0.5f - cy));
@@ -222,29 +139,22 @@ public:
         }
     }
 
-    struct TextItem {
-        int x, y, w, h;
-        int fontSize;
-        bool bold;
-        bool centerH;
-        Color col;
-        std::wstring text;
-    };
+    enum class Align { Left, Center, Right };
 
-    void QueueText(int x, int y, int w, int h, int fontSize, bool bold, bool centerH, Color c, const char* txt) {
-        if (!txt || !*txt) return;
-        std::wstring wtxt;
-        for (const char* p = txt; *p; ++p) wtxt.push_back(static_cast<wchar_t>(static_cast<unsigned char>(*p)));
-        m_texts.push_back(TextItem{x, y, w, h, fontSize, bold, centerH, c, std::move(wtxt)});
+    void QueueText(int x, int y, int w, int h, int pxHeight, bool bold, Align align, Color col, const char* utf8) {
+        if (!utf8 || !*utf8) return;
+        const int need = MultiByteToWideChar(CP_UTF8, 0, utf8, -1, nullptr, 0);
+        if (need <= 1) return;
+        std::wstring ws(static_cast<size_t>(need - 1), L'\0');
+        MultiByteToWideChar(CP_UTF8, 0, utf8, -1, ws.data(), need);
+        m_texts.push_back(TextItem{x, y, w, h, pxHeight, bold, align, col, std::move(ws)});
     }
 
     void FinalizeTo(bool wantBgra, std::vector<uint8_t>& outPixels) {
-        // Rasterize queued anti-aliased Segoe UI text onto a top-down 32bpp DIB initialized from m_rgba (stored BGRA),
-        // preserving our rounded outer alpha mask so crisp GDI typography keeps proper panel transparency.
         BITMAPINFO bmi{};
         bmi.bmiHeader.biSize        = sizeof(BITMAPINFOHEADER);
         bmi.bmiHeader.biWidth       = static_cast<LONG>(m_w);
-        bmi.bmiHeader.biHeight      = -static_cast<LONG>(m_h); // top-down
+        bmi.bmiHeader.biHeight      = -static_cast<LONG>(m_h);
         bmi.bmiHeader.biPlanes      = 1;
         bmi.bmiHeader.biBitCount    = 32;
         bmi.bmiHeader.biCompression = BI_RGB;
@@ -264,41 +174,42 @@ public:
                                    DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                                    ANTIALIASED_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
             };
-            HFONT fTitle = makeFont(24, true);
-            HFONT fSub   = makeFont(14, false);
-            HFONT fRow   = makeFont(17, false);
-            HFONT fVal   = makeFont(16, true);
-            HFONT fBtn   = makeFont(17, true);
+            HFONT fTitle = makeFont(28, true);
+            HFONT fSub   = makeFont(16, false);
+            HFONT fRow   = makeFont(20, false);
+            HFONT fRowB  = makeFont(20, true);
+            HFONT fVal   = makeFont(19, true);
             HGDIOBJ oldFont = SelectObject(memDC, fRow);
 
             for (const auto& t : m_texts) {
                 HFONT hf = fRow;
-                if (t.fontSize >= 22) hf = fTitle;
-                else if (t.fontSize <= 14) hf = fSub;
-                else if (t.fontSize == 17 && t.bold) hf = fBtn;
-                else if (t.bold) hf = fVal;
+                if (t.fontSize >= 26) hf = fTitle;
+                else if (t.fontSize <= 16) hf = fSub;
+                else if (t.fontSize == 19) hf = fVal;
+                else if (t.bold) hf = fRowB;
                 SelectObject(memDC, hf);
                 SetTextColor(memDC, RGB(t.col.r, t.col.g, t.col.b));
                 RECT rc{t.x, t.y, t.x + t.w, t.y + t.h};
-                const UINT fmt = DT_SINGLELINE | DT_VCENTER | (t.centerH ? DT_CENTER : DT_LEFT);
-                DrawTextW(memDC, t.text.c_str(), static_cast<int>(t.text.size()), &rc, fmt);
+                UINT aFlag = DT_LEFT;
+                if (t.align == Align::Center) aFlag = DT_CENTER;
+                else if (t.align == Align::Right) aFlag = DT_RIGHT;
+                DrawTextW(memDC, t.text.c_str(), static_cast<int>(t.text.size()), &rc,
+                          DT_SINGLELINE | DT_VCENTER | aFlag);
             }
 
             SelectObject(memDC, oldFont);
             DeleteObject(fTitle);
             DeleteObject(fSub);
             DeleteObject(fRow);
+            DeleteObject(fRowB);
             DeleteObject(fVal);
-            DeleteObject(fBtn);
             SelectObject(memDC, oldBmp);
 
-            // Copy RGB from DIB while preserving m_rgba's exact alpha channel!
             const auto* src = static_cast<const uint8_t*>(bits);
             for (size_t i = 0; i < totalBytes; i += 4) {
                 m_rgba[i + 0] = src[i + 0];
                 m_rgba[i + 1] = src[i + 1];
                 m_rgba[i + 2] = src[i + 2];
-                // keep m_rgba[i + 3] alpha untouched (GDI clears alpha byte on glyphs)
             }
         }
         if (dib) DeleteObject(dib);
@@ -319,6 +230,14 @@ public:
     }
 
 private:
+    struct TextItem {
+        int x, y, w, h, fontSize;
+        bool bold;
+        Align align;
+        Color col;
+        std::wstring text;
+    };
+
     void SetRawBgra(uint32_t x, uint32_t y, Color c) {
         uint8_t* p = &m_rgba[(static_cast<size_t>(y) * m_w + x) * 4];
         p[0] = c.b;
@@ -330,7 +249,7 @@ private:
     void BlendPixel(int x, int y, Color src) {
         if (src.a == 0) return;
         uint8_t* p = &m_rgba[(static_cast<size_t>(y) * m_w + x) * 4];
-        const uint8_t sr = src.b; // internal buffer is BGRA (matching Windows 32bpp DIB)
+        const uint8_t sr = src.b;
         const uint8_t sg = src.g;
         const uint8_t sb = src.r;
         if (src.a == 255 || p[3] == 0) {
@@ -352,7 +271,7 @@ private:
 
     uint32_t m_w;
     uint32_t m_h;
-    std::vector<uint8_t> m_rgba; // BGRA pixel storage
+    std::vector<uint8_t> m_rgba;
     std::vector<TextItem> m_texts;
 };
 
@@ -366,22 +285,21 @@ struct RowMeta {
 };
 
 constexpr RowMeta kRows[kRowCount] = {
-    {"View Scale (1=Full)",    true,   0.70f,  1.15f, 0.02f, false}, // 0
-    {"Image Sharpness",        true,   0.00f,  1.00f, 0.05f, false}, // 1
-    {"Text / HUD Lift",        true,   0.00f,  1.00f, 0.05f, false}, // 2
-    {"Crosshair Size",         true,   0.50f,  2.00f, 0.10f, false}, // 3
-    {"World Scale (UU/m)",     true,  30.0f, 100.0f,  2.0f,  false}, // 4
-    {"Eye Height Offset",      true, -30.0f,  30.0f,  2.0f,  false}, // 5
-    {"Turn Speed",             true,   0.00f,  2.50f, 0.10f, false}, // 6
-    {"Move Relative To",       false,  0.0f,   0.0f,  0.0f,  false}, // 7
-    {"Stereo Mode",            false,  0.0f,   0.0f,  0.0f,  false}, // 8
-    {"Match Render Pose",      false,  0.0f,   0.0f,  0.0f,  false}, // 9
-    {"Cam-Lock Suppressor",    false,  0.0f,   0.0f,  0.0f,  false}, // 10
-    {"Aim From Hand",          false,  0.0f,   0.0f,  0.0f,  false}, // 11
-    {"Hide Game Crosshair",    false,  0.0f,   0.0f,  0.0f,  false}, // 12
-    {"[ Recenter View (HMD & Menu) ]", false, 0, 0, 0, true},       // 13
-    {"[ Save Settings to samu_vr.ini ]", false, 0, 0, 0, true},     // 14
-    {"[ Close VR Settings Menu ]",       false, 0, 0, 0, true},     // 15
+    {"View Scale",              true,   0.70f,  1.15f, 0.02f, false}, // 0
+    {"Image Sharpness",         true,   0.00f,  1.00f, 0.05f, false}, // 1
+    {"HUD & Subtitle Lift",     true,   0.00f,  1.00f, 0.05f, false}, // 2
+    {"Reticle Size",            true,   0.50f,  2.00f, 0.10f, false}, // 3
+    {"World Scale (UU/m)",      true,  30.0f, 100.0f,  2.0f,  false}, // 4
+    {"Eye Height Offset",       true, -30.0f,  30.0f,  2.0f,  false}, // 5
+    {"Turn Speed",              true,   0.00f,  2.50f, 0.10f, false}, // 6
+    {"Move Relative To",        false,  0.0f,   0.0f,  0.0f,  false}, // 7
+    {"Match Render Pose",       false,  0.0f,   0.0f,  0.0f,  false}, // 8
+    {"Cam-Lock Suppressor",     false,  0.0f,   0.0f,  0.0f,  false}, // 9
+    {"Aim From Hand",           false,  0.0f,   0.0f,  0.0f,  false}, // 10
+    {"Hide Game Crosshair",     false,  0.0f,   0.0f,  0.0f,  false}, // 11
+    {"Recenter View",           false,  0.0f,   0.0f,  0.0f,  true},  // 12
+    {"Save Settings",           false,  0.0f,   0.0f,  0.0f,  true},  // 13
+    {"Resume Game",             false,  0.0f,   0.0f,  0.0f,  true},  // 14
 };
 
 float GetSliderValue(int row) {
@@ -425,11 +343,10 @@ void FormatRowValue(int row, char* out, size_t cap) {
         std::snprintf(out, cap, "%s", m == 0 ? "Body" : (m == 2 ? "Left Hand" : "Head"));
         break;
     }
-    case 8: std::snprintf(out, cap, "%s", samu::config::GetStereoMode() == 1 ? "AFR (3D)" : "MONO (Smooth)"); break;
-    case 9: std::snprintf(out, cap, "%s", samu::config::IsMatchRenderPoseEnabled() ? "ON" : "OFF"); break;
-    case 10: std::snprintf(out, cap, "%s", samu::config::IsCameraLockSuppressorEnabled() ? "ON" : "OFF"); break;
-    case 11: std::snprintf(out, cap, "%s", samu::config::IsAimFromHandEnabled() ? "ON" : "OFF"); break;
-    case 12: std::snprintf(out, cap, "%s", samu::config::IsHideGameCrosshairEnabled() ? "ON" : "OFF"); break;
+    case 8: std::snprintf(out, cap, "%s", samu::config::IsMatchRenderPoseEnabled() ? "ON" : "OFF"); break;
+    case 9: std::snprintf(out, cap, "%s", samu::config::IsCameraLockSuppressorEnabled() ? "ON" : "OFF"); break;
+    case 10: std::snprintf(out, cap, "%s", samu::config::IsAimFromHandEnabled() ? "ON" : "OFF"); break;
+    case 11: std::snprintf(out, cap, "%s", samu::config::IsHideGameCrosshairEnabled() ? "ON" : "OFF"); break;
     default: out[0] = '\0'; break;
     }
 }
@@ -443,7 +360,7 @@ void VrSettingsMenu::SetOpen(bool open) {
     m_prevTrigger = m_prevJump = m_prevMenu = false;
     m_prevNavX = m_prevNavY = 0;
     if (open) {
-        SetStatus("Point + Trigger or Thumbstick + A to adjust");
+        SetStatus("Point with Trigger or use Stick + A");
     }
     m_dirty = true;
 }
@@ -459,7 +376,6 @@ void VrSettingsMenu::SetSliderFromBarU(int row, float normT) {
     if (!r.isSlider) return;
     normT = std::clamp(normT, 0.0f, 1.0f);
     float raw = r.minVal + normT * (r.maxVal - r.minVal);
-    // Snap cleanly to step increments.
     float snapped = std::round((raw - r.minVal) / r.step) * r.step + r.minVal;
     if (std::fabs(snapped - GetSliderValue(row)) > 1e-4f) {
         SetSliderValue(row, snapped);
@@ -477,11 +393,10 @@ void VrSettingsMenu::AdjustRow(int row, int dir) {
     }
     switch (row) {
     case 7: samu::config::SetLocomotionDirection((samu::config::GetLocomotionDirection() + dir + 3) % 3); break;
-    case 8: samu::config::SetStereoMode(samu::config::GetStereoMode() == 1 ? 0 : 1); break;
-    case 9: samu::config::SetMatchRenderPose(!samu::config::IsMatchRenderPoseEnabled()); break;
-    case 10: samu::config::SetCameraLockSuppressor(!samu::config::IsCameraLockSuppressorEnabled()); break;
-    case 11: samu::config::SetAimFromHand(!samu::config::IsAimFromHandEnabled()); break;
-    case 12: samu::config::SetHideGameCrosshair(!samu::config::IsHideGameCrosshairEnabled()); break;
+    case 8: samu::config::SetMatchRenderPose(!samu::config::IsMatchRenderPoseEnabled()); break;
+    case 9: samu::config::SetCameraLockSuppressor(!samu::config::IsCameraLockSuppressorEnabled()); break;
+    case 10: samu::config::SetAimFromHand(!samu::config::IsAimFromHandEnabled()); break;
+    case 11: samu::config::SetHideGameCrosshair(!samu::config::IsHideGameCrosshairEnabled()); break;
     default: break;
     }
     m_dirty = true;
@@ -492,7 +407,7 @@ void VrSettingsMenu::ActivateRow(int row, float clickU) {
     const auto& r = kRows[row];
     if (r.isSlider) {
         const float px = clickU * kWidth;
-        if (px >= kBarX0 - 10 && px <= kBarX1 + 10) {
+        if (px >= kBarX0 - 12 && px <= kBarX1 + 12) {
             m_dragSlider = row;
             SetSliderFromBarU(row, (px - kBarX0) / static_cast<float>(kBarX1 - kBarX0));
         } else {
@@ -504,11 +419,11 @@ void VrSettingsMenu::ActivateRow(int row, float clickU) {
         AdjustRow(row, +1);
         return;
     }
-    if (row == 13) {
-        SetStatus("View recentered to current pose!");
-    } else if (row == 14) {
+    if (row == 12) {
+        SetStatus("View recentered to current pose");
+    } else if (row == 13) {
         const bool saved = samu::config::SaveSettings();
-        SetStatus(saved ? "Saved all settings to samu_vr.ini!" : "Save failed (check folder permissions)");
+        SetStatus(saved ? "Settings saved to samu_vr.ini" : "Save failed (check folder permissions)");
     }
 }
 
@@ -549,11 +464,10 @@ VrMenuUpdateResult VrSettingsMenu::Update(const ControllerInputState& input,
     const bool jump    = input.active && input.jumpButtonPressed;
     const bool menu    = input.active && input.menuButtonPressed;
 
-    // Trigger click / slider drag via raycast.
     if (trigger && hasRayHit) {
         if (!m_prevTrigger) {
-            if (m_selectedRow == 13) res.recenterRequested = true;
-            if (m_selectedRow == 15) res.closeRequested    = true;
+            if (m_selectedRow == 12) res.recenterRequested = true;
+            if (m_selectedRow == 14) res.closeRequested    = true;
             ActivateRow(m_selectedRow, rayU);
         } else if (m_dragSlider >= 0) {
             const float px = rayU * kWidth;
@@ -563,7 +477,6 @@ VrMenuUpdateResult VrSettingsMenu::Update(const ControllerInputState& input,
         m_dragSlider = -1;
     }
 
-    // Thumbstick navigation (either stick works).
     float sx = (std::fabs(input.rightStick.x) > std::fabs(input.leftStick.x)) ? input.rightStick.x : input.leftStick.x;
     float sy = (std::fabs(input.rightStick.y) > std::fabs(input.leftStick.y)) ? input.rightStick.y : input.leftStick.y;
     const int navY = (sy > 0.55f) ? -1 : ((sy < -0.55f) ? +1 : 0);
@@ -581,14 +494,12 @@ VrMenuUpdateResult VrSettingsMenu::Update(const ControllerInputState& input,
     m_prevNavY = navY;
     m_prevNavX = navX;
 
-    // A / X activates current row.
     if (jump && !m_prevJump) {
-        if (m_selectedRow == 13) res.recenterRequested = true;
-        if (m_selectedRow == 15) res.closeRequested    = true;
+        if (m_selectedRow == 12) res.recenterRequested = true;
+        if (m_selectedRow == 14) res.closeRequested    = true;
         ActivateRow(m_selectedRow, 0.85f);
     }
 
-    // B / Left Menu closes menu cleanly.
     if (menu && !m_prevMenu) {
         res.closeRequested = true;
     }
@@ -604,20 +515,12 @@ bool VrSettingsMenu::RenderIfDirty(bool bgra, std::vector<uint8_t>& outPixels) {
     m_dirty = false;
 
     Canvas cv(kWidth, kHeight);
-    cv.FillPanelGradient(14.0f);
+    cv.FillPanelBackdrop(10.0f);
 
-    // Header band + SAMU grapple diamond emblem + subtle hairline divider
-    cv.FillRect(14, 2, static_cast<int>(kWidth) - 28, kHeaderH - 4, kColBgHeader);
-    cv.DrawSamuCrosshairEmblem(182.0f, 38.0f, 19.0f);
-    cv.FillRect(kPadX, kHeaderH - 2, static_cast<int>(kWidth) - 2 * kPadX, 1, Color{72, 168, 212, 145});
-
-    cv.QueueText(218, 12, 420, 28, 24, true, false, kColTextHi, "VR SETTINGS");
-    cv.QueueText(218, 42, 460, 22, 14, false, false, kColTextDim, "R3 / F10: Close   |   Trigger or Stick + A: Adjust");
-
-    // Footer separator band
-    const int footerY = kRowStartY + kRowCount * kRowH + 8;
-    cv.FillRect(14, footerY, static_cast<int>(kWidth) - 28, static_cast<int>(kHeight) - footerY - 12, kColBgFooter);
-    cv.FillRect(kPadX, footerY, static_cast<int>(kWidth) - 2 * kPadX, 1, Color{44, 78, 108, 155});
+    // Clean SAMU-style minimal header
+    cv.QueueText(kPadX, 18, static_cast<int>(kWidth) - 2 * kPadX, 34, 28, true, Canvas::Align::Center, kColTextHi, "VR SETTINGS");
+    cv.QueueText(kPadX, 54, static_cast<int>(kWidth) - 2 * kPadX, 24, 16, false, Canvas::Align::Center, kColTextDim, "Click Right Stick or F10 to close");
+    cv.FillRect(kPadX, kHeaderH, static_cast<int>(kWidth) - 2 * kPadX, 1, kColRule);
 
     char valBuf[48]{};
     for (int i = 0; i < kRowCount; ++i) {
@@ -625,66 +528,63 @@ bool VrSettingsMenu::RenderIfDirty(bool bgra, std::vector<uint8_t>& outPixels) {
         const int ry = kRowStartY + i * kRowH;
         const bool sel = (i == m_selectedRow);
 
+        if (i == 12) {
+            // Subtle divider separating settings from bottom actions
+            cv.FillRect(kPadX, ry - 4, static_cast<int>(kWidth) - 2 * kPadX, 1, kColRule);
+        }
+
         if (r.isAction) {
-            const Color btnBorder = sel ? kColAccent : kColBorder;
-            cv.FillRoundedRect(static_cast<float>(kPadX), static_cast<float>(ry + 4),
-                               static_cast<float>(kWidth - 2 * kPadX), static_cast<float>(kRowH - 8),
-                               7.0f, sel ? kColBtnHover : kColBtnIdle, sel ? 1.5f : 1.0f, btnBorder);
-            if (sel) cv.FillDiamond(static_cast<float>(kPadX + 20), static_cast<float>(ry + kRowH / 2), 6.0f, kColAccent);
-            cv.QueueText(kPadX, ry + 4, static_cast<int>(kWidth) - 2 * kPadX, kRowH - 8, 17, true, true,
-                         sel ? kColTextHi : kColAccent, r.label);
+            cv.FillRoundedRect(static_cast<float>(kPadX), static_cast<float>(ry + 5),
+                               static_cast<float>(kWidth - 2 * kPadX), static_cast<float>(kRowH - 10),
+                               4.0f, sel ? kColBtnHover : kColBtnIdle, 1.0f, sel ? kColAccent : kColBtnEdge);
+            cv.QueueText(kPadX, ry + 5, static_cast<int>(kWidth) - 2 * kPadX, kRowH - 10, 20, sel, Canvas::Align::Center,
+                         sel ? kColTextHi : kColTextMid, r.label);
             continue;
         }
 
-        cv.FillRoundedRect(static_cast<float>(kPadX), static_cast<float>(ry + 3),
-                           static_cast<float>(kWidth - 2 * kPadX), static_cast<float>(kRowH - 6),
-                           6.0f, sel ? kColRowHover : kColRowIdle, sel ? 1.5f : 0.75f,
-                           sel ? kColAccentSoft : Color{32, 54, 78, 110});
         if (sel) {
-            cv.FillRect(kPadX + 2, ry + 8, 3, kRowH - 16, kColAccent);
+            cv.FillRoundedRect(static_cast<float>(kPadX), static_cast<float>(ry + 3),
+                               static_cast<float>(kWidth - 2 * kPadX), static_cast<float>(kRowH - 6),
+                               4.0f, kColRowHover);
+            cv.FillRect(kPadX, ry + 8, 3, kRowH - 16, kColAccent);
         }
 
-        cv.QueueText(kPadX + 16, ry + 3, 300, kRowH - 6, 17, sel, false, sel ? kColTextHi : kColTextMid, r.label);
+        cv.QueueText(kPadX + 18, ry, 340, kRowH, 20, sel, Canvas::Align::Left, sel ? kColTextHi : kColTextMid, r.label);
         FormatRowValue(i, valBuf, sizeof(valBuf));
 
         if (r.isSlider) {
-            const float barY = static_cast<float>(ry + 18);
-            const float barH = 7.0f;
+            const float barY = static_cast<float>(ry + kRowH / 2 - 2);
+            const float barH = 4.0f;
             const float barW = static_cast<float>(kBarX1 - kBarX0);
-            cv.FillRoundedRect(static_cast<float>(kBarX0), barY, barW, barH, 3.5f, kColBarTrack);
+            cv.FillRoundedRect(static_cast<float>(kBarX0), barY, barW, barH, 2.0f, kColBarTrack);
             const float t = std::clamp((GetSliderValue(i) - r.minVal) / (r.maxVal - r.minVal), 0.0f, 1.0f);
             const float fillW = std::max(barH, t * barW);
-            cv.FillRoundedRect(static_cast<float>(kBarX0), barY, fillW, barH, 3.5f, sel ? kColAccent : kColBarFill);
-            cv.FillDiamond(static_cast<float>(kBarX0) + t * barW, barY + barH * 0.5f, 8.5f,
-                           sel ? kColTextHi : Color{215, 238, 250, 255});
-            cv.QueueText(kBarX1 + 18, ry + 3, 110, kRowH - 6, 16, true, false,
-                         sel ? kColAccent : kColTextHi, valBuf);
+            cv.FillRoundedRect(static_cast<float>(kBarX0), barY, fillW, barH, 2.0f, sel ? kColAccent : kColBarIdle);
+            cv.FillCircle(static_cast<float>(kBarX0) + t * barW, barY + barH * 0.5f, sel ? 8.0f : 6.5f,
+                          sel ? kColTextHi : kColBarIdle);
+            cv.QueueText(kBarX1 + 14, ry, static_cast<int>(kWidth) - kPadX - (kBarX1 + 14) - 10, kRowH, 19, true,
+                         Canvas::Align::Right, sel ? kColAccent : kColTextHi, valBuf);
         } else {
-            const int pillW = 148;
-            const int pillX = static_cast<int>(kWidth) - kPadX - 14 - pillW;
             const bool isOn = (std::strcmp(valBuf, "ON") == 0);
-            const Color pillFill = isOn ? Color{28, 62, 84, 240} : (sel ? kColBtnHover : kColBtnIdle);
-            const Color pillEdge = isOn ? Color{88, 186, 224, 210} : (sel ? kColAccent : kColBorder);
-            cv.FillRoundedRect(static_cast<float>(pillX), static_cast<float>(ry + 7),
-                               static_cast<float>(pillW), static_cast<float>(kRowH - 14),
-                               6.0f, pillFill, 1.0f, pillEdge);
-            const Color vc = isOn ? kColWarmGold : (sel ? kColTextHi : kColAccent);
-            cv.QueueText(pillX, ry + 7, pillW, kRowH - 14, 16, true, true, vc, valBuf);
+            const bool isOff = (std::strcmp(valBuf, "OFF") == 0);
+            const Color vc = isOn ? kColToggleOn : (isOff ? kColToggleOff : (sel ? kColAccent : kColTextHi));
+            cv.QueueText(kBarX0, ry, static_cast<int>(kWidth) - kPadX - kBarX0 - 10, kRowH, 19, true,
+                         Canvas::Align::Right, vc, valBuf);
         }
     }
 
-    // Footer status message
+    const int footerY = kRowStartY + kRowCount * kRowH + 14;
+    cv.FillRect(kPadX, footerY, static_cast<int>(kWidth) - 2 * kPadX, 1, kColRule);
     const char* footer = !m_statusText.empty() ? m_statusText.c_str()
-                                               : "Changes apply immediately. Press Save Settings to persist.";
-    cv.QueueText(kPadX, footerY + 6, static_cast<int>(kWidth) - 2 * kPadX, 42, 14, !m_statusText.empty(), true,
-                 !m_statusText.empty() ? kColWarmGold : kColTextDim, footer);
+                                               : "Changes apply immediately. Use Save Settings to keep them.";
+    cv.QueueText(kPadX, footerY + 12, static_cast<int>(kWidth) - 2 * kPadX, 38, 16, false, Canvas::Align::Center,
+                 !m_statusText.empty() ? kColAccent : kColTextDim, footer);
 
-    // Diamond-accented laser pointer cursor (drawn behind GDI? Fine here BEFORE finalize so it never smears text)
     if (m_hasCursor) {
         const float cx = m_cursorU * kWidth;
         const float cy = m_cursorV * kHeight;
-        cv.FillCircle(cx, cy, 9.0f, Color{96, 214, 248, 130});
-        cv.FillDiamond(cx, cy, 5.0f, Color{240, 250, 255, 255});
+        cv.FillCircle(cx, cy, 8.0f, Color{232, 186, 108, 120});
+        cv.FillCircle(cx, cy, 4.0f, Color{255, 255, 255, 255});
     }
 
     cv.FinalizeTo(bgra, outPixels);

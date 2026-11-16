@@ -317,17 +317,9 @@ void UpdateMenuPointer(const vr::OpenXRManager& xr, const vr::TrackingState& s, 
     s_prevEnter = enter;
 }
 
-// In-headset calibration (no keyboard needed). While BOTH grips are held:
-//   A / X -> toggle stereo mode (AFR <-> mono), same as F9.
-// (Right-stick ViewScale trim was removed because sprint + power-jump hold both grips in normal play and
-//  drifted ViewScale away from 1.0, breaking 1:1 head-turn angular lock; adjust [Display] ViewScale in ini if needed.)
-void UpdateCalibrationGestures(const vr::TrackingState& s) {
-    static bool s_prevJump = false;
-    const bool held = s.input.active && s.input.leftGripPressed && s.input.rightGripPressed;
-    if (held && s.input.jumpButtonPressed && !s_prevJump) {
-        samu::config::SetStereoMode(samu::config::GetStereoMode() == 1 ? 0 : 1);
-    }
-    s_prevJump = s.input.jumpButtonPressed;
+// In-headset calibration gestures placeholder (Left/Right grip + A used to toggle AFR,
+// which triggered accidentally when sprinting + power-jumping + jumping in normal play).
+void UpdateCalibrationGestures(const vr::TrackingState&) {
 }
 
 // D3D9 Present hook -> which pose sample / eye the presented frame was rendered with.
