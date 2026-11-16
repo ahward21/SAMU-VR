@@ -998,12 +998,23 @@ std::atomic<float> g_reticleDistUU{1500.0f};
 std::atomic<bool>  g_reticleLit{false};
 
 // The game's HUD: a Scaleform movie whose crosshair clip sits in the middle of the (head-locked) picture.
+struct PopupBgState {
+    UObject* obj        = nullptr;
+    float    baseX      = 0.0f;
+    float    baseY      = 0.0f;
+    float    baseW      = 0.0f;
+    bool     haveBase   = false;
+    float    appliedPct = -1.0f;
+};
+
 struct HudRig {
     bool       resolved        = false;
     UProperty* propMyHud       = nullptr;
     UProperty* propHudMovie    = nullptr;
     UProperty* propCrosshairMC = nullptr;
     UProperty* propPopupsMC    = nullptr;      // ASAMUHUDMovie.PopupsMC (GFxObject)
+    UProperty* propBgSingleMC  = nullptr;      // ASAMUHUDMovie.BgSingleMC (GFxObject)
+    UProperty* propBgMultiMC   = nullptr;      // ASAMUHUDMovie.BgMultiMC (GFxObject)
     UProperty* propPopupTF     = nullptr;      // ASAMUHUDMovie.PopupTF (GFxClikWidget)
     UBoolProperty* propMovieHidden = nullptr;  // ASAMUHUDMovie.bHidden
     UBoolProperty* propPauseFade   = nullptr;  // ASAMUHUD.bPauseMenuFade
@@ -1020,6 +1031,8 @@ struct HudRig {
     UObject*   lastHud         = nullptr;
     UObject*   lastClip        = nullptr;
     UObject*   lastPopup       = nullptr;
+    PopupBgState bgSingle;
+    PopupBgState bgMulti;
     UObject*   scaledSubtitleFont = nullptr;
     float      origSubtitleScale  = 1.0f;
     float      basePopupX      = 0.0f;
@@ -1027,6 +1040,7 @@ struct HudRig {
     float      basePopupW      = 0.0f;
     bool       haveBasePopupPos = false;
     bool       popupScaled      = false;
+    float      popupDesiredLocalW = 560.0f;
     float      lastAppliedLift = -1.0f;
     int        lastWanted      = -1;
     int64_t    lastAssertMs    = 0;
@@ -1902,8 +1916,9 @@ void UpdateHudForVr(UObject* pcObj) {
     if (!IsLiveUObject(hud)) { g_reticleLit.store(false, std::memory_order_relaxed); return; }
     h.lastHud = hud;
 
-    if ((!h.resolved || !h.propPopupsMC || !h.propPopupTF || !h.propPauseFade || !h.propPauseMovie ||
-         !h.fnGetPosition || !h.fnSetPosition || !h.fnGetFloat || !h.fnSetFloat || !h.fnGetString || !h.fnSetString) &&
+    if ((!h.resolved || !h.propPopupsMC || !h.propBgSingleMC || !h.propBgMultiMC || !h.propPopupTF ||
+         !h.propPauseFade || !h.propPauseMovie || !h.fnGetPosition || !h.fnSetPosition ||
+         !h.fnGetFloat || !h.fnSetFloat || !h.fnGetString || !h.fnSetString) &&
         nowMs - h.lastResolveMs > 1000) {
         h.lastResolveMs = nowMs;
         if (!h.propHudMovie)       h.propHudMovie       = FindPropertyInClassChain(hud->Class, "HudMovie", "ObjectProperty");
@@ -1943,6 +1958,8 @@ void UpdateHudForVr(UObject* pcObj) {
             if (IsLiveUObject(movie)) {
                 if (!h.propCrosshairMC) h.propCrosshairMC = FindPropertyInClassChain(movie->Class, "CrosshairMC", "ObjectProperty");
                 if (!h.propPopupsMC)    h.propPopupsMC    = FindPropertyInClassChain(movie->Class, "PopupsMC",    "ObjectProperty");
+                if (!h.propBgSingleMC)  h.propBgSingleMC  = FindPropertyInClassChain(movie->Class, "BgSingleMC",  "ObjectProperty");
+                if (!h.propBgMultiMC)   h.propBgMultiMC   = FindPropertyInClassChain(movie->Class, "BgMultiMC",   "ObjectProperty");
                 if (!h.propPopupTF)     h.propPopupTF     = FindPropertyInClassChain(movie->Class, "PopupTF",     "ObjectProperty");
                 if (!h.propMovieHidden) h.propMovieHidden = static_cast<UBoolProperty*>(FindPropertyInClassChain(movie->Class, "bHidden", "BoolProperty"));
             }
@@ -2052,80 +2069,165 @@ void UpdateHudForVr(UObject* pcObj) {
         }
     }
 
-    // Remap keyboard/mouse tutorial hints in Scaleform's PopupTF to VR Touch controls (e.g. [SPACE] -> [LEFT TRIGGER / A]).
-    if (h.propPopupTF && h.fnGetString && h.fnSetString && nowMs - h.lastPopupPollMs >= 150) {
-        bool popupHidden = false;
-        if (h.propMovieHidden) {
-            const uint32_t bits = *reinterpret_cast<const uint32_t*>(reinterpret_cast<const uint8_t*>(movie) + h.propMovieHidden->Offset);
-            popupHidden = (bits & h.propMovieHidden->BitMask) != 0;
-        }
-        if (!popupHidden) {
-            UObject* tf = *reinterpret_cast<UObject* const*>(reinterpret_cast<const uint8_t*>(movie) + h.propPopupTF->Offset);
-            if (IsLiveUObject(tf)) {
-                h.lastPopupPollMs = nowMs;
-                static wchar_t s_memberText[] = L"text";
-                struct { FString Member; FString ReturnValue; } gs{};
-                static_assert(sizeof(gs) == 0x18, "GetString parms");
-                gs.Member.Data = s_memberText;
-                gs.Member.Num  = 5;
-                gs.Member.Max  = 5;
-                g_origProcessEvent(tf, h.fnGetString, &gs, nullptr);
-                if (gs.ReturnValue.Data && gs.ReturnValue.Num > 1 && gs.ReturnValue.Num < 512) {
-                    std::wstring txt(gs.ReturnValue.Data, static_cast<size_t>(gs.ReturnValue.Num - 1));
-                    if (!txt.empty() && txt != h.lastVrPopupText) {
-                        std::wstring out = txt;
-                        auto replaceCI = [&](const std::wstring& needle, const std::wstring& repl) {
-                            std::wstring upperOut = out, upperN = needle;
-                            std::transform(upperOut.begin(), upperOut.end(), upperOut.begin(), ::towupper);
-                            std::transform(upperN.begin(), upperN.end(), upperN.begin(), ::towupper);
-                            size_t pos = 0;
-                            bool hit = false;
-                            while ((pos = upperOut.find(upperN, pos)) != std::wstring::npos) {
-                                out.replace(pos, needle.size(), repl);
-                                upperOut.replace(pos, needle.size(), repl);
-                                pos += repl.size();
-                                hit = true;
-                            }
-                            return hit;
-                        };
-                        bool changed = false;
-                        changed |= replaceCI(L"USE THE MOUSE TO LOOK AROUND", L"LOOK AROUND OR R-STICK");
-                        changed |= replaceCI(L"[SPACEBAR]",         L"[L-TRIGGER / A]");
-                        changed |= replaceCI(L"[SPACE]",            L"[L-TRIGGER / A]");
-                        changed |= replaceCI(L"[LEFTSHIFT]",        L"[L-GRIP / L3]");
-                        changed |= replaceCI(L"[RIGHTSHIFT]",       L"[L-GRIP / L3]");
-                        changed |= replaceCI(L"[SHIFT]",            L"[L-GRIP / L3]");
-                        changed |= replaceCI(L"[RIGHTMOUSEBUTTON]", L"[R-GRIP]");
-                        changed |= replaceCI(L"[RIGHTMOUSE]",       L"[R-GRIP]");
-                        changed |= replaceCI(L"[RMB]",              L"[R-GRIP]");
-                        changed |= replaceCI(L"[LEFTMOUSEBUTTON]",  L"[R-TRIGGER]");
-                        changed |= replaceCI(L"[LEFTMOUSE]",        L"[R-TRIGGER]");
-                        changed |= replaceCI(L"[LMB]",              L"[R-TRIGGER]");
-                        changed |= replaceCI(L"[XBOXTYPE_A]",       L"[L-TRIGGER / A]");
-                        changed |= replaceCI(L"[W]",                L"[L-STICK]");
-                        changed |= replaceCI(L"[MOUSE]",            L"[R-STICK]");
-                        changed |= replaceCI(L"AND THE MOUSE",      L"AND R-STICK");
-                        if (changed) {
-                            static wchar_t s_vrTextBuf[512]{};
-                            const size_t n = std::min<size_t>(out.size(), 510);
-                            std::wmemcpy(s_vrTextBuf, out.c_str(), n);
-                            s_vrTextBuf[n] = L'\0';
-                            struct { FString Member; FString s; UObject* InContext; } ss{};
-                            static_assert(sizeof(ss) == 0x1C, "SetString parms");
-                            ss.Member.Data = s_memberText;
-                            ss.Member.Num  = 5;
-                            ss.Member.Max  = 5;
-                            ss.s.Data      = s_vrTextBuf;
-                            ss.s.Num       = static_cast<int32_t>(n + 1);
-                            ss.s.Max       = static_cast<int32_t>(n + 1);
-                            g_origProcessEvent(tf, h.fnSetString, &ss, nullptr);
-                            h.lastVrPopupText = out;
-                            LOG_INFO("UE3Bridge: tutorial popup remapped to VR -> '%ls'", out.c_str());
+    // Remap keyboard/mouse tutorial hints in Scaleform's PopupTF to clear VR controller labels
+    // and compute the text's line width so the dark popup backdrop hugs the text instead of spanning full-width.
+    bool popupHidden = false;
+    if (h.propMovieHidden) {
+        const uint32_t bits = *reinterpret_cast<const uint32_t*>(reinterpret_cast<const uint8_t*>(movie) + h.propMovieHidden->Offset);
+        popupHidden = (bits & h.propMovieHidden->BitMask) != 0;
+    }
+    if (h.propPopupTF && h.fnGetString && h.fnSetString && !popupHidden && nowMs - h.lastPopupPollMs >= 33) {
+        UObject* tf = *reinterpret_cast<UObject* const*>(reinterpret_cast<const uint8_t*>(movie) + h.propPopupTF->Offset);
+        if (IsLiveUObject(tf)) {
+            h.lastPopupPollMs = nowMs;
+            static wchar_t s_memberText[] = L"text";
+            struct { FString Member; FString ReturnValue; } gs{};
+            static_assert(sizeof(gs) == 0x18, "GetString parms");
+            gs.Member.Data = s_memberText;
+            gs.Member.Num  = 5;
+            gs.Member.Max  = 5;
+            g_origProcessEvent(tf, h.fnGetString, &gs, nullptr);
+            if (gs.ReturnValue.Data && gs.ReturnValue.Num > 1 && gs.ReturnValue.Num < 512) {
+                std::wstring txt(gs.ReturnValue.Data, static_cast<size_t>(gs.ReturnValue.Num - 1));
+                if (!txt.empty() && txt != h.lastVrPopupText) {
+                    std::wstring out = txt;
+                    auto replaceCI = [&](const std::wstring& needle, const std::wstring& repl) {
+                        std::wstring upperOut = out, upperN = needle;
+                        std::transform(upperOut.begin(), upperOut.end(), upperOut.begin(), ::towupper);
+                        std::transform(upperN.begin(), upperN.end(), upperN.begin(), ::towupper);
+                        size_t pos = 0;
+                        bool hit = false;
+                        while ((pos = upperOut.find(upperN, pos)) != std::wstring::npos) {
+                            out.replace(pos, needle.size(), repl);
+                            upperOut.replace(pos, needle.size(), repl);
+                            pos += repl.size();
+                            hit = true;
+                        }
+                        return hit;
+                    };
+                    bool changed = false;
+                    changed |= replaceCI(L"USE THE MOUSE TO LOOK AROUND", L"LOOK AROUND OR USE [RIGHT STICK]");
+                    changed |= replaceCI(L"AND THE MOUSE TO LOOK AROUND", L"AND [RIGHT STICK] TO TURN");
+                    changed |= replaceCI(L"AND THE MOUSE",                L"AND [RIGHT STICK]");
+                    changed |= replaceCI(L"[SPACEBAR]",                   L"[LEFT TRIGGER] OR [A]");
+                    changed |= replaceCI(L"[SPACE]",                      L"[LEFT TRIGGER] OR [A]");
+                    changed |= replaceCI(L"[XBOXTYPE_A]",                 L"[LEFT TRIGGER] OR [A]");
+                    changed |= replaceCI(L"[XBOXTYPES_A]",                L"[LEFT TRIGGER] OR [A]");
+                    changed |= replaceCI(L"GBA_ReleaseableJump | RocketBoostKeyDown", L"[LEFT TRIGGER] OR [A]");
+                    changed |= replaceCI(L"[LEFTSHIFT]",                  L"[LEFT GRIP]");
+                    changed |= replaceCI(L"[RIGHTSHIFT]",                 L"[LEFT GRIP]");
+                    changed |= replaceCI(L"[SHIFT]",                      L"[LEFT GRIP]");
+                    changed |= replaceCI(L"[XBOXTYPES_LEFTSHOULDER]",     L"[LEFT GRIP]");
+                    changed |= replaceCI(L"[XBOXTYPES_LEFTTHUMBSTICK]",   L"[LEFT GRIP]");
+                    changed |= replaceCI(L"GBA_Sprint",                   L"[LEFT GRIP]");
+                    changed |= replaceCI(L"[RIGHTMOUSEBUTTON]",           L"[RIGHT GRIP]");
+                    changed |= replaceCI(L"[RIGHTMOUSE]",                 L"[RIGHT GRIP]");
+                    changed |= replaceCI(L"[RMB]",                        L"[RIGHT GRIP]");
+                    changed |= replaceCI(L"[XBOXTYPES_RIGHTSHOULDER]",    L"[RIGHT GRIP]");
+                    changed |= replaceCI(L"[XBOXTYPES_LEFTTRIGGER]",      L"[RIGHT GRIP]");
+                    changed |= replaceCI(L"GBA_PowerJump",                L"[RIGHT GRIP]");
+                    changed |= replaceCI(L"[LEFTMOUSEBUTTON]",            L"[RIGHT TRIGGER]");
+                    changed |= replaceCI(L"[LEFTMOUSE]",                  L"[RIGHT TRIGGER]");
+                    changed |= replaceCI(L"[LMB]",                        L"[RIGHT TRIGGER]");
+                    changed |= replaceCI(L"[XBOXTYPES_RIGHTTRIGGER]",     L"[RIGHT TRIGGER]");
+                    changed |= replaceCI(L"GBA_Fire",                     L"[RIGHT TRIGGER]");
+                    changed |= replaceCI(L"[W]",                          L"[LEFT STICK]");
+                    changed |= replaceCI(L"[XBOXTYPES_LEFTY]",            L"[LEFT STICK]");
+                    changed |= replaceCI(L"[XBOXTYPES_LEFTX]",            L"[LEFT STICK]");
+                    changed |= replaceCI(L"GBA_MoveForward_Gamepad_Reverse", L"[LEFT STICK]");
+                    changed |= replaceCI(L"GBA_MoveForward_Gamepad",      L"[LEFT STICK]");
+                    changed |= replaceCI(L"GBA_MoveForward",              L"[LEFT STICK]");
+                    changed |= replaceCI(L"[MOUSE]",                      L"[RIGHT STICK]");
+                    changed |= replaceCI(L"[XBOXTYPES_RIGHTX]",           L"[RIGHT STICK]");
+                    changed |= replaceCI(L"[XBOXTYPES_RIGHTY]",           L"[RIGHT STICK]");
+                    changed |= replaceCI(L"GBA_Look_Gamepad_Reverse",     L"[RIGHT STICK]");
+                    changed |= replaceCI(L"GBA_Look_Gamepad",             L"[RIGHT STICK]");
+                    if (changed) {
+                        static wchar_t s_vrTextBuf[512]{};
+                        const size_t n = std::min<size_t>(out.size(), 510);
+                        std::wmemcpy(s_vrTextBuf, out.c_str(), n);
+                        s_vrTextBuf[n] = L'\0';
+                        struct { FString Member; FString s; UObject* InContext; } ss{};
+                        static_assert(sizeof(ss) == 0x1C, "SetString parms");
+                        ss.Member.Data = s_memberText;
+                        ss.Member.Num  = 5;
+                        ss.Member.Max  = 5;
+                        ss.s.Data      = s_vrTextBuf;
+                        ss.s.Num       = static_cast<int32_t>(n + 1);
+                        ss.s.Max       = static_cast<int32_t>(n + 1);
+                        g_origProcessEvent(tf, h.fnSetString, &ss, nullptr);
+                        LOG_INFO("UE3Bridge: tutorial popup remapped to VR -> '%ls'", out.c_str());
+                    }
+                    h.lastVrPopupText = out;
+                    size_t maxLineChars = 0, curLineChars = 0;
+                    for (wchar_t ch : out) {
+                        if (ch == L'\r' || ch == L'\n') {
+                            maxLineChars = std::max(maxLineChars, curLineChars);
+                            curLineChars = 0;
+                        } else {
+                            ++curLineChars;
                         }
                     }
+                    maxLineChars = std::max(maxLineChars, curLineChars);
+                    h.popupDesiredLocalW = std::clamp(static_cast<float>(maxLineChars) * 17.5f + 110.0f, 420.0f, 840.0f);
                 }
             }
         }
+    }
+
+    // Trim the full-width black popup background bars (BgSingleMC / BgMultiMC) into a compact centered card.
+    if (h.fnSetFloat && h.fnGetPosition && h.fnSetPosition) {
+        auto updateBg = [&](UProperty* propBg, PopupBgState& st, const char* tag) {
+            if (!propBg) return;
+            UObject* bg = *reinterpret_cast<UObject* const*>(reinterpret_cast<const uint8_t*>(movie) + propBg->Offset);
+            if (!IsLiveUObject(bg)) return;
+            if (bg != st.obj) {
+                st = PopupBgState{};
+                st.obj = bg;
+            }
+            if (!st.haveBase) {
+                struct { float X; float Y; uint32_t Ret; } gp{};
+                g_origProcessEvent(bg, h.fnGetPosition, &gp, nullptr);
+                if (gp.Ret) {
+                    st.baseX    = gp.X;
+                    st.baseY    = gp.Y;
+                    st.haveBase = true;
+                }
+            }
+            if (st.haveBase && st.baseW <= 10.0f && h.fnGetFloat) {
+                static wchar_t s_mW[] = L"_width";
+                struct { FString Member; float Ret; } gf{};
+                gf.Member.Data = s_mW; gf.Member.Num = 7; gf.Member.Max = 7;
+                g_origProcessEvent(bg, h.fnGetFloat, &gf, nullptr);
+                if (gf.Ret > 10.0f) st.baseW = gf.Ret;
+            }
+            if (!st.haveBase) return;
+            const float desiredW = std::clamp(h.popupDesiredLocalW, 420.0f, 840.0f);
+            const float targetPct = (st.baseW > 10.0f)
+                ? std::clamp((desiredW / st.baseW) * 100.0f, 22.0f, 65.0f)
+                : 42.0f;
+            if (st.appliedPct < 0.0f || std::fabs(targetPct - st.appliedPct) > 1.5f) {
+                static wchar_t s_mXS[] = L"_xscale";
+                static wchar_t s_mA[]  = L"_alpha";
+                struct { FString Member; float Val; } sx{}, al{};
+                sx.Member.Data = s_mXS; sx.Member.Num = 8; sx.Member.Max = 8; sx.Val = targetPct;
+                al.Member.Data = s_mA;  al.Member.Num = 7; al.Member.Max = 7; al.Val = 78.0f;
+                g_origProcessEvent(bg, h.fnSetFloat, &sx, nullptr);
+                g_origProcessEvent(bg, h.fnSetFloat, &al, nullptr);
+                if (st.baseX <= -100.0f && st.baseW > 10.0f) {
+                    const float newX = st.baseX + st.baseW * (1.0f - targetPct * 0.01f) * 0.5f;
+                    struct { float X; float Y; } sp{newX, st.baseY};
+                    g_origProcessEvent(bg, h.fnSetPosition, &sp, nullptr);
+                }
+                if (st.appliedPct < 0.0f) {
+                    LOG_INFO("UE3Bridge: HUD %s base=(%.1f, %.1f) w=%.1f -> _xscale=%.1f%%",
+                             tag, st.baseX, st.baseY, st.baseW, targetPct);
+                }
+                st.appliedPct = targetPct;
+            }
+        };
+        updateBg(h.propBgSingleMC, h.bgSingle, "BgSingleMC");
+        updateBg(h.propBgMultiMC,  h.bgMulti,  "BgMultiMC");
     }
 }
 
@@ -2351,6 +2453,10 @@ void EndGameplayFrames() {
     g_aimRig.gun             = nullptr;
     g_hudRig.lastClip        = nullptr;
     g_hudRig.lastHud         = nullptr;
+    g_hudRig.lastPopup       = nullptr;
+    g_hudRig.bgSingle        = PopupBgState{};
+    g_hudRig.bgMulti         = PopupBgState{};
+    g_hudRig.lastVrPopupText.clear();
     g_hudRig.lastWanted      = -1;
     g_framesWithViewOverride = 0;
     g_appliedResW            = 0;
