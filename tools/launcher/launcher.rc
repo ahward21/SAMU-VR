@@ -1,0 +1,4 @@
+#include "resource.h"
+
+IDR_PROXY_DLL   RCDATA "../../dist/d3d9.dll"
+IDR_DEFAULT_INI RCDATA "../../samu_vr.ini"

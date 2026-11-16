@@ -1,0 +1,27 @@
+# Build & build artifacts
+build/
+dist/
+out/
+
+# Game binaries & extracted game SDK/scripts (do not redistribute copyrighted game assets)
+game_bin/
+sdk_dump/
+
+# Logs & runtime outputs
+*.log
+samu_vr_live.log
+samu_vr.log
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# IDE / editor / agent state
+.antigravity/
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+*.sln.docstates
